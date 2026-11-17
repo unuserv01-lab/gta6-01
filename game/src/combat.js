@@ -1,92 +1,123 @@
-// Combat: a simple punch and a simple shot. Punching knocks a pedestrian
-// back and scares them; shooting hits the nearest police car, convoy car or
-// pedestrian in front of the player. Both raise heat — the city is watching.
-import { HEAT_PUNCH, HEAT_SHOOT, PUNCH_COOLDOWN, PUNCH_RANGE, SHOOT_COOLDOWN, SHOOT_RANGE, angleDiff } from './config.js';
-import { nearestPed } from './traffic.js';
-import { spawnSparks } from './vehicles.js';
+// LIVE HEIST — combat.js
+// Simple combat: Space punches on foot, mouse click shoots toward the cursor.
+// Bullets are short-lived tracers; hitting a cop raises the heat, hitting a
+// pedestrian raises it more. Police rams are the real threat (see police.js).
 
-/** The player throws a punch at whatever is in front of them. */
+import { HEAT_HIT_PED, HEAT_SHOOT, clamp, dist } from './config.js';
+import { addHeat } from './police.js';
+
+/** Fresh combat state. */
+export function createCombat() {
+  return { bullets: [], punchT: 0, shootCd: 0, muzzleT: 0 };
+}
+
+/** Punch: a short arc in front of the player, on foot only. */
 export function doPunch(state) {
-  const { player } = state;
-  if (player.punchCd > 0 || !player.onFoot) return;
-  player.punchCd = PUNCH_COOLDOWN;
-  state.audio.punch();
-  const px = player.x + Math.cos(player.angle) * PUNCH_RANGE;
-  const py = player.y + Math.sin(player.angle) * PUNCH_RANGE;
-  // Punch a pedestrian: they run away, and the crowd sees it.
-  const ped = nearestPed(state, px, py, PUNCH_RANGE + 10);
-  if (ped) {
-    ped.panic = 3;
-    player.addHeat(HEAT_PUNCH);
-    spawnSparks(state, ped.x, ped.y, 6);
-    return;
+  const combat = state.combat;
+  if (combat.punchT > 0 || !state.player.onFoot) return;
+  combat.punchT = 0.28;
+  state.audio.thud();
+  const px = state.player.x;
+  const py = state.player.y;
+  const a = state.player.angle;
+  const fx = px + Math.cos(a) * 34;
+  const fy = py + Math.sin(a) * 34;
+  let hit = false;
+  for (const car of state.police.cars) {
+    if (dist(fx, fy, car.x, car.y) < 56) {
+      car.speed *= 0.4;
+      hit = true;
+    }
   }
-  // Punch a police car: dents it and really raises the heat.
-  for (const car of state.cars) {
-    if (car.kind !== 'police' && car.kind !== 'swat') continue;
-    const d = Math.hypot(car.x - px, car.y - py);
-    if (d < 60) {
-      car.hp -= 6;
-      player.addHeat(HEAT_PUNCH * 2);
-      spawnSparks(state, car.x, car.y, 8);
-      return;
+  for (const ped of state.traffic.peds) {
+    if (dist(fx, fy, ped.x, ped.y) < 40) {
+      ped.tx = ped.x + (state.rng() - 0.5) * 300;
+      ped.ty = ped.y + (state.rng() - 0.5) * 300;
+      hit = true;
+    }
+  }
+  if (hit) addHeat(state, 8, '');
+  state.particles.push({ x: fx, y: fy, vx: 0, vy: 0, life: 0.18, maxLife: 0.18, size: 26, color: 'rgba(255,255,255,0.7)', kind: 'flash' });
+}
+
+/** Shoot toward the mouse cursor (world space). Works on foot and from a car. */
+export function doShoot(state, mouseWorldX, mouseWorldY) {
+  const combat = state.combat;
+  if (combat.shootCd > 0) return;
+  combat.shootCd = 0.32;
+  combat.muzzleT = 0.08;
+  const px = state.player.x;
+  const py = state.player.y;
+  const a = Math.atan2(mouseWorldY - py, mouseWorldX - px);
+  combat.bullets.push({ x: px + Math.cos(a) * 22, y: py + Math.sin(a) * 22, vx: Math.cos(a) * 780, vy: Math.sin(a) * 780, life: 0.55 });
+  state.audio.shot();
+  addHeat(state, HEAT_SHOOT, '');
+}
+
+/** Advance bullets and the punch timer. */
+export function stepCombat(state, dt) {
+  const combat = state.combat;
+  combat.punchT = Math.max(0, combat.punchT - dt);
+  combat.shootCd = Math.max(0, combat.shootCd - dt);
+  combat.muzzleT = Math.max(0, combat.muzzleT - dt);
+  for (let i = combat.bullets.length - 1; i >= 0; i--) {
+    const b = combat.bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt;
+    let dead = b.life <= 0;
+    if (!dead) {
+      for (const car of state.police.cars) {
+        if (dist(b.x, b.y, car.x, car.y) < 34) {
+          car.speed *= 0.55;
+          dead = true;
+          addHeat(state, 4, '');
+          break;
+        }
+      }
+    }
+    if (!dead) {
+      for (const ped of state.traffic.peds) {
+        if (dist(b.x, b.y, ped.x, ped.y) < 14) {
+          ped.tx = ped.x + (state.rng() - 0.5) * 400;
+          ped.ty = ped.y + (state.rng() - 0.5) * 400;
+          dead = true;
+          addHeat(state, HEAT_HIT_PED, 'Warga tertembak — penonton melonjak!');
+          break;
+        }
+      }
+    }
+    if (dead) {
+      state.particles.push({ x: b.x, y: b.y, vx: 0, vy: 0, life: 0.25, maxLife: 0.25, size: 12, color: '#ffd166', kind: 'flash' });
+      combat.bullets.splice(i, 1);
     }
   }
 }
 
-/** The player fires one shot in the direction they face. */
-export function doShoot(state) {
-  const { player } = state;
-  if (player.shootCd > 0) return;
-  player.shootCd = SHOOT_COOLDOWN;
-  state.audio.shoot();
-  const ox = player.onFoot ? player.x : player.car.x;
-  const oy = player.onFoot ? player.y : player.car.y;
-  const oa = player.angle;
-  // Muzzle flash particle.
-  state.particles.push({
-    x: ox + Math.cos(oa) * 24,
-    y: oy + Math.sin(oa) * 24,
-    vx: Math.cos(oa) * 60, vy: Math.sin(oa) * 60,
-    life: 0.12, maxLife: 0.12, size: 7, color: '#ffe066',
-  });
-  let best = null;
-  let bestD = SHOOT_RANGE;
-  for (const car of state.cars) {
-    if (car === player.car) continue;
-    const dx = car.x - ox;
-    const dy = car.y - oy;
-    const d = Math.hypot(dx, dy);
-    if (d > bestD) continue;
-    if (Math.abs(angleDiff(Math.atan2(dy, dx), oa)) > 0.45) continue;
-    bestD = d;
-    best = { kind: 'car', target: car };
+/** Draw bullets, muzzle flash and the punch arc. */
+export function drawCombat(ctx, state) {
+  const combat = state.combat;
+  ctx.save();
+  ctx.strokeStyle = '#ffe66d';
+  ctx.lineWidth = 3;
+  for (const b of combat.bullets) {
+    ctx.beginPath();
+    ctx.moveTo(b.x - b.vx * 0.03, b.y - b.vy * 0.03);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
   }
-  if (!best) {
-    const ped = nearestPed(state, ox + Math.cos(oa) * 120, oy + Math.sin(oa) * 120, 130);
-    if (ped) best = { kind: 'ped', target: ped };
+  if (combat.muzzleT > 0) {
+    ctx.fillStyle = '#fff3a0';
+    ctx.beginPath();
+    ctx.arc(state.player.x + Math.cos(state.player.angle) * 24, state.player.y + Math.sin(state.player.angle) * 24, 9, 0, Math.PI * 2);
+    ctx.fill();
   }
-  if (!best) return;
-  player.addHeat(HEAT_SHOOT);
-  if (best.kind === 'car') {
-    best.target.hp -= 20;
-    spawnSparks(state, best.target.x, best.target.y, 10);
-    if (best.target.kind === 'police' || best.target.kind === 'swat') {
-      best.target.speed = Math.max(best.target.speed, 200);
-    }
-    if (best.target.kind === 'convoy' && best.target.hp <= 0) {
-      best.target.stopped = true;
-      best.target.speed = 0;
-    }
-    if ((best.target.kind === 'police' || best.target.kind === 'swat') && best.target.hp <= 0) {
-      state.cars = state.cars.filter((c) => c !== best.target);
-      state.police = state.police.filter((c) => c !== best.target);
-      spawnSparks(state, best.target.x, best.target.y, 24);
-      state.message = 'MOBIL POLISI DILUMPUHKAN!';
-      state.messageT = 2;
-    }
-  } else {
-    best.target.panic = 4;
-    spawnSparks(state, best.target.x, best.target.y, 6);
+  if (combat.punchT > 0 && state.player.onFoot) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(state.player.x, state.player.y, 34, state.player.angle - 0.7, state.player.angle + 0.7);
+    ctx.stroke();
   }
+  ctx.restore();
 }

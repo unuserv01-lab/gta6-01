@@ -1,137 +1,107 @@
-// LIVE HEIST — tuning, palette, and the seeded random number generator.
-// Every number that shapes the game lives here so the other files stay small
-// and a judge reading the outline can see the whole balance at a glance.
-export const GAME_TITLE = 'LIVE HEIST';
-export const CITY_NAME = 'COSTA VIDRIO';
+// LIVE HEIST — config.js
+// All tuning for Costa Vidrio: city size, movement, wanted/viewer math, palette.
+// One job: constants. Nothing here touches the DOM or the game state.
 
-// World size in pixels (top-down city). Roads form a grid; the beach is east.
-export const WORLD_WIDTH = 3600;
-export const WORLD_HEIGHT = 2600;
-export const ROAD_WIDTH = 120;
-export const VERTICAL_ROADS = [300, 900, 1500, 2100, 2700, 3300];
-export const HORIZONTAL_ROADS = [300, 800, 1300, 1800, 2300];
-export const BEACH_X = 3420; // sand starts here; water past WORLD_WIDTH - 60
-
-// Canvas the game draws into (screenshots are 1280x720).
-export const VIEW_WIDTH = 1280;
-export const VIEW_HEIGHT = 720;
+// World geometry: a sunny coastal city, 40 x 30 tiles of 64 px.
+export const TILE = 64;
+export const COLS = 40;
+export const ROWS = 30;
+export const WORLD_W = COLS * TILE;
+export const WORLD_H = ROWS * TILE;
 export const STEP = 1 / 60;
+export const SAVE_KEY = 'liveheist-save-v1';
 
-// Player on foot.
-export const WALK_SPEED = 210;
+// Avenues (vertical roads) and streets (horizontal roads), in tile coordinates.
+// Each road is 2 tiles wide; the beach is the last rows, the sea after it.
+export const AVENUES = [5, 13, 21, 29, 37];
+export const STREETS = [4, 11, 18, 25];
+export const BEACH_ROW = 27;
+export const SEA_ROW = 28;
+
+// Player movement.
+export const PLAYER_WALK = 195;
+export const PLAYER_RUN = 265;
 export const PLAYER_RADIUS = 14;
-export const PUNCH_RANGE = 46;
-export const SHOOT_RANGE = 300;
-export const SHOOT_COOLDOWN = 0.35;
-export const PUNCH_COOLDOWN = 0.4;
+export const PLAYER_HEALTH = 100;
 
-// Driving.
-export const CAR_ACCEL = 420;
-export const CAR_BRAKE = 620;
-export const CAR_MAX_SPEED = 460;
-export const CAR_REVERSE_MAX = 160;
+// Car physics.
+export const CAR_ACCEL = 520;
+export const CAR_MAX = 430;
+export const CAR_REVERSE = 170;
 export const CAR_TURN = 2.6;
-export const CAR_LENGTH = 52;
-export const CAR_WIDTH = 26;
+export const CAR_BRAKE = 700;
+export const CAR_DRAG = 0.55;
+export const POLICE_MAX = 465;
+export const SWAT_MAX = 500;
 
-// Wanted level: heat thresholds per star, and how fast heat cools off.
-export const STAR_HEAT = [0, 25, 60, 110, 170, 240];
-export const HEAT_DECAY = 2.2; // per second, on the street
-export const HEAT_DECAY_HIDEOUT = 60; // per second inside a garage/alley
-export const HEAT_CAR_STEAL = 30;
-export const HEAT_PUNCH = 12;
-export const HEAT_SHOOT = 20;
-export const HEAT_RAM_COP = 18;
-export const MAX_POLICE = [0, 2, 3, 4, 5, 6];
+// Wanted / viewer-count tuning. Heat 0..100 maps to stars 0..5.
+export const HEAT_STEAL_CAR = 18;
+export const HEAT_PUNCH = 8;
+export const HEAT_SHOOT = 12;
+export const HEAT_HIT_PED = 15;
+export const HEAT_ROBBERY = 42;
+export const HEAT_DECAY = 1.6;
+export const HEAT_HIDEOUT_DECAY = 22;
+export const STAR_THRESHOLDS = [0, 12, 30, 52, 72, 90];
+export const VIEWERS_BASE = 120;
 
-// Viewers: the wanted level IS the audience. Base crowd + per-star crowd.
-export const VIEWERS_BASE = 1200;
-export const VIEWERS_PER_STAR = 3200;
-export const VIEWERS_MISSION_BONUS = 2600;
-
-// Money / followers.
-export const START_MONEY = 250;
-export const START_FOLLOWERS = 1200;
-export const BUSTED_FINE = 500;
-export const MISSION_1_REWARD_MONEY = 2500;
-export const MISSION_1_REWARD_FOLLOWERS = 5000;
-export const MISSION_2_REWARD_MONEY = 6000;
-export const MISSION_2_REWARD_FOLLOWERS = 12000;
-
-// Palette: sun-baked orange / cyan / pink, Costa Vidrio at noon.
+// Sun-soaked Costa Vidrio palette: orange, cyan, pink, warm sand.
 export const PALETTE = {
-  ground: '#e9d9a6',
-  sand: '#f2dd9e',
-  water: '#2fb7c9',
-  waterDeep: '#1d8fa8',
-  grass: '#9ccb6b',
+  sky: '#ffe3b3',
+  grass: '#8fce6e',
+  sand: '#f2d492',
+  sea: '#2fa8c9',
+  seaDeep: '#1e7fa8',
+  sidewalk: '#e3d3ae',
   road: '#3d414d',
-  roadEdge: '#2c2f38',
-  sidewalk: '#cfc3a0',
-  laneDash: '#f5d76e',
-  buildingRoof: ['#ff8c42', '#ff5d8f', '#38b6c9', '#ffb347', '#e26d9c', '#7ec8e3', '#f78d5c', '#c084fc'],
-  buildingEdge: '#8a6d4b',
-  shopAwning: ['#ff5d8f', '#38b6c9', '#ff8c42', '#ffd23f'],
-  playerCar: '#ff7a1a',
-  playerShirt: '#ff5d8f',
-  policeCar: '#f2f2f2',
-  policeStripe: '#1d4ed8',
-  swatVan: '#23262e',
-  civilCar: ['#ffd23f', '#38b6c9', '#ff8c42', '#e8e8e8', '#7ec8e3', '#c084fc', '#9ccb6b'],
-  pedShirt: ['#ff5d8f', '#38b6c9', '#ffd23f', '#7ec8e3', '#ffffff', '#ff8c42'],
-  heliBody: '#e11d48',
-  heliGlass: '#7dd3fc',
-  minimapBg: 'rgba(12, 16, 28, 0.82)',
-  hudPanel: 'rgba(12, 16, 28, 0.78)',
-  liveRed: '#ff2d55',
-  starGold: '#ffd23f',
-  textWhite: '#ffffff',
-  textDark: '#1c2433',
+  roadLine: '#ffd94d',
+  buildingOrange: '#ff9f43',
+  buildingCyan: '#38b6d3',
+  buildingPink: '#ff6b9d',
+  buildingYellow: '#ffd166',
+  buildingCream: '#f7ede2',
+  buildingTeal: '#2ec4b6',
+  roof: '#2b2f3a',
+  garage: '#5b6b7a',
+  park: '#79c25f',
+  liveRed: '#e63946',
+  gold: '#ffb703',
+  hudBg: 'rgba(12, 16, 28, 0.78)',
+  hudLine: 'rgba(255, 255, 255, 0.16)',
 };
 
-/** Mulberry32 seeded RNG: the same seed always builds the same city traffic. */
-export function createRng(seed) {
-  let a = seed >>> 0;
-  return function next() {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+/** Clamp a number into [lo, hi]. */
+export function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** Pick one item from an array with the seeded RNG. */
-export function pick(rng, list) {
-  return list[Math.floor(rng() * list.length)];
+/** Linear interpolation. */
+export function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
-/** Format a viewer count the way a livestream does: 12400 -> "12.4K". */
-export function formatViewers(count) {
-  if (count >= 1000000) return (count / 1000000).toFixed(1) + 'M';
-  if (count >= 1000) return (count / 1000).toFixed(1) + 'K';
-  return String(Math.floor(count));
-}
-
-/** Format money: 2500 -> "$2,500". */
-export function formatMoney(amount) {
-  return '$' + Math.floor(amount).toLocaleString('en-US');
-}
-
-/** Clamp a number between min and max. */
-export function clamp(value, min, max) {
-  return value < min ? min : value > max ? max : value;
-}
-
-/** Distance between two points. */
-export function dist(x1, y1, x2, y2) {
-  return Math.hypot(x2 - x1, y2 - y1);
-}
-
-/** Shortest angle difference, wrapped to [-PI, PI]. */
+/** Smallest signed angle difference from a to b, in radians. */
 export function angleDiff(a, b) {
-  let d = a - b;
+  let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return d;
+}
+
+/** Distance between two points. */
+export function dist(ax, ay, bx, by) {
+  return Math.hypot(bx - ax, by - ay);
+}
+
+/** Format a viewer/follower count: 12400 -> "12.4K", 950 -> "950". */
+export function formatCount(n) {
+  const v = Math.max(0, Math.floor(n));
+  if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
+  return String(v);
+}
+
+/** Format cash: 1250 -> "$1,250". */
+export function formatMoney(n) {
+  return `$${Math.floor(n).toLocaleString('en-US')}`;
 }
