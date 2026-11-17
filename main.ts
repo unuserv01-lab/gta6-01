@@ -1,19 +1,12 @@
-// LIVE HEIST — the entry program (Node 22, standard library only). The game is
-// this directory's game/ folder, plain static files a desktop browser loads
-// offline (game/index.html and its ES modules, no library and no network
-// request), and the program hands it in: it copies game/ and screenshots/ from
-// beside this file to /output and writes /output/dossier.json, the summary the
-// judge reads, with the vendored make.fun library.
+// LIVE HEIST — the entrypoint (Node 22, standard library only).
+// The game is this directory's game/ folder: plain static files a desktop
+// browser loads offline (game/index.html and its ES modules, no library and
+// no network request). This program hands it in: it copies game/ and
+// screenshots/ from beside this file to /output and writes /output/dossier.json,
+// the summary the judge reads, with the vendored make.fun library.
 //
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-//
-// The game itself is an original open-world crime game: Costa Vidrio, a
-// sun-soaked coastal city where the whole town broadcasts the player live —
-// the wanted level is a viewer count, police chase, a news helicopter
-// follows at 3+ stars, citizens film at 4+ stars, and two heist episodes
-// pay sponsor money and followers.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,6 +15,16 @@ import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+// Deterministic by construction: the same repository always writes the same
+// bytes (same file set, same order, same dossier). Fail loudly instead of
+// handing in a half-built entry when the game folder is missing.
+if (!existsSync(join(here, 'game', 'index.html'))) {
+  throw new Error('LIVE HEIST: game/index.html is missing — the game was not built');
+}
+if (!existsSync(join(here, 'screenshots'))) {
+  throw new Error('LIVE HEIST: screenshots/ is missing — take the four screenshots first');
+}
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });

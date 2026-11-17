@@ -1,54 +1,68 @@
-[![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/c/gta6-01)
-[![rank](https://make.fun/badge/gta6-01/unuserv01-lab/gta6-01/rank.svg)](https://make.fun/c/gta6-01)
-[![reward](https://make.fun/badge/gta6-01/unuserv01-lab/gta6-01/reward.svg)](https://make.fun/c/gta6-01)
-
 # LIVE HEIST — Costa Vidrio
 
-Game open-world crime 2D top-down yang berjalan 100% offline di browser desktop,
-dibangun untuk kompetisi make.fun **"Make GTA 6" (gta6-01)**.
+[![make.fun](https://img.shields.io/badge/make.fun-gta6--01-orange)](https://make.fun/bounty/gta6-01)
+[![make.fun](https://img.shields.io/badge/make.fun-LIVE_HEIST-ff6b35)](https://make.fun/bounty/gta6-01)
+Built for make.fun's gta6-01 bounty.
 
-**Konsep:** seluruh kota Costa Vidrio menyiarkan aksimu secara LIVE. Wanted level
-adalah *viewer count* — makin ribut aksimu, makin banyak penonton, makin keras
-respons polisi. Bintang 1–2: mobil polisi mengejar. Bintang 3: helikopter berita
-TV-7 menempel di atasmu. Bintang 4–5: roadblock, SWAT, dan warga ikut merekam
-dengan HP mereka. Kabur ke garasi/gang = **"putus siaran"**, bintang turun.
-Tiap heist adalah satu **episode** dengan reward sponsor + followers.
+An open-world crime game in the browser. The whole city of **Costa Vidrio**
+is broadcasting you live: your wanted level **is** the viewer count.
+The louder your crime, the more stars you earn, the bigger the audience —
+and the harder the police, the news helicopter, the roadblocks and SWAT
+come for you. Slip into an alley or the garage to cut the broadcast
+("putus siaran") and the stars fall.
 
-## Cara main
+## How to play
 
-- **WASD / panah** — jalan kaki atau mengemudi
-- **E** — curi mobil (dekati mobil sipil) / keluar mobil
-- **SPACE** — pukul • **F** — tembak
-- **Q** — lihat objective misi • **P / Esc** — jeda • **M** — suara
-- **Enter** — mulai / lanjut
-
-## Misi (2 episode)
-
-1. **Episode 1 — Kasino Coral:** masuk ke Coral Casino, tahan di zona kuning
-   sampai chip berlian didapat, lalu kabur ke garasi. Reward $2.500 + 5.000 followers.
-2. **Episode 2 — Konvoi Berlian:** hentikan mobil konvoi di jalan ring, rebut
-   muatannya, kabur ke garasi. Reward $6.000 + 12.000 followers (sponsor SURF & SOLE).
-
-Progress tersimpan otomatis di localStorage (uang, followers, episode selesai).
-
-## Yang ada di dalam game
-
-- Kota Costa Vidrio: jalan kaki + mobil, traffic sipil + pejalan kaki (termasuk
-  warga merekam saat bintang tinggi), pantai di timur, 3 garasi "putus siaran"
-- Polisi mengejar + bintang wanted 1–5 + viewer count + helikopter berita
-- HUD padat: minimap, bintang, badge LIVE, ticker berita, objective, uang, followers
-- Combat sederhana, efek partikel + jejak ban + flash kamera, audio synth WebAudio
-- Start screen, pause, layar "TERTANGKAP!", layar hasil episode
-
-## Menjalankan
+Serve the game folder with any static server and open `game/index.html`
+in a desktop browser. It plays 100% offline — no network request, no CDN.
 
 ```sh
-node serve.ts        # lalu buka http://localhost:8080
+cd game && python3 -m http.server 8080
+# open http://localhost:8080
 ```
 
-Tanpa build step, tanpa network request, tanpa library eksternal — vanilla JS +
-canvas saja. Screenshot dibuat dari kode game sendiri via `?shot=cover|chase|walk|mission&seed=1`.
+| Key | Action |
+| --- | --- |
+| WASD / arrows | Walk / drive |
+| Shift | Run |
+| E | Steal a car / exit the car (hold E to rob the shop) |
+| Mouse click | Shoot toward the cursor |
+| Space | Punch |
+| M | Start the next heist episode |
+| P / Esc | Pause |
+| Enter | Start / continue |
 
-## Lisensi
+## The game
 
-MIT — lihat [LICENSE](LICENSE).
+- **Explore on foot and by car** — a sunny coastal city with avenues,
+  streets, shops, parks, a beach and the sea. Steal any civilian car
+  with E and drive it.
+- **Traffic + pedestrians** — civilian cars drive the roads, pedestrians
+  stroll the sidewalks. At 4+ stars, bystanders stop, raise their phones
+  and record you (REC icon + camera flash).
+- **Wanted = viewer count** — heat from stealing, punching, shooting and
+  robbing raises the stars (1–5) and the LIVE viewer counter. Stars 1–2:
+  patrol cars chase. Star 3: the TV-7 news helicopter sticks to you.
+  Stars 4–5: roadblocks and a SWAT van. Hide in the garage or an alley
+  to cut the broadcast and cool down.
+- **Missions (episodes)** — Episode 1 "Paket Panas": steal a car and
+  deliver the package to the gold DROP point. Episode 2 "Rampok Toko
+  Sari": rob the shop, then escape to the garage. Rewards are sponsor
+  cash + followers — that is the progression.
+- **HUD** — LIVE badge, viewer count, wanted stars, cash + followers,
+  minimap (player, police, heli, mission marker), mission objective,
+  scrolling TV-7 news ticker, health bar.
+- **Polish** — camera follows the player, drift smoke, crash sparks,
+  camera flashes, WebAudio synth (siren, horn, gunshot, chimes, engine),
+  title / pause / busted / season-complete screens, and a localStorage
+  save (cash, followers, episodes).
+
+## Screenshots
+
+`?shot=1` cover (hero car on the sunny avenue, full HUD) •
+`?shot=2` 4-star chase with the news heli, 3 patrol cars and a roadblock •
+`?shot=3` on foot by TOKO SARI with recording bystanders •
+`?shot=4` Season 1 complete — episode results.
+
+All names, places, characters and art are original. Nothing is taken from
+any commercial game.
