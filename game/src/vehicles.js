@@ -1,159 +1,146 @@
-// LIVE HEIST — vehicles.js
-// The player's car: stealing, driving, exiting. Top-down arcade physics —
-// throttle, steering that bites with speed, braking, drift smoke, and
-// building collision that slides instead of stopping dead.
+// The player's body and cars: walking the sidewalks, stealing a parked or
+// civilian car, and driving it. Stealing is the crime that starts the show:
+// it adds wanted heat and a ticker line, and the whole city starts watching.
 
-import {
-  CAR_ACCEL,
-  CAR_BRAKE,
-  CAR_DRAG,
-  CAR_MAX,
-  CAR_REVERSE,
-  CAR_TURN,
-  PLAYER_RADIUS,
-  WORLD_H,
-  WORLD_W,
-  angleDiff,
-  clamp,
-} from './config.js';
-import { isBlockedAt } from './world.js';
-import { drawCarShape } from './traffic.js';
+import { CAR, PLAYER, WANTED } from './config.js';
+import { angleDiff, burst, clamp, nearestCar, playerCar, resolveCircle, setTicker } from './world.js';
 
-/** A fresh vehicle entity. */
-export function createVehicle(x, y, angle, color, kind = 'sedan') {
-  return { x, y, angle, speed: 0, color, kind, parked: false, flashT: 0 };
-}
-
-const PLAYER_CAR_COLORS = ['#ff6b35', '#38b6d3', '#ffd166', '#ff6b9d'];
-
-/** The nearest stealable civilian car within reach of the player, or null. */
-export function nearestStealableCar(state) {
-  let best = null;
-  let bestD = 86;
-  for (const car of state.traffic.cars) {
-    const d = Math.hypot(car.x - state.player.x, car.y - state.player.y);
-    if (d < bestD) {
-      bestD = d;
-      best = car;
-    }
-  }
-  return best;
-}
-
-/** E pressed on foot: steal the nearest car (heat!) or exit the car. */
-export function enterOrExitCar(state) {
-  const player = state.player;
-  if (player.car) {
-    // Exit: step out to the side of the car, leave it parked in traffic.
-    const side = player.car.angle + Math.PI / 2;
-    const px = player.car.x + Math.cos(side) * 34;
-    const py = player.car.y + Math.sin(side) * 34;
-    player.car.parked = true;
-    player.car.speed = 0;
-    state.traffic.cars.push(player.car);
-    player.x = isBlockedAt(state.world, px, py, PLAYER_RADIUS) ? player.car.x - Math.cos(side) * 34 : px;
-    player.y = isBlockedAt(state.world, px, py, PLAYER_RADIUS) ? player.car.y - Math.sin(side) * 34 : py;
-    player.car = null;
-    player.onFoot = true;
-    player.angle = side;
-    return 'exit';
-  }
-  const car = nearestStealableCar(state);
-  if (!car) return null;
-  state.traffic.cars.splice(state.traffic.cars.indexOf(car), 1);
-  car.parked = false;
-  car.speed = 0;
-  player.car = car;
-  player.onFoot = false;
-  player.x = car.x;
-  player.y = car.y;
-  player.angle = car.angle;
-  return 'steal';
-}
-
-/** Drive the player's car one step. Returns true when drifting (for smoke + sound). */
-export function stepPlayerCar(state, dt, input) {
-  const car = state.player.car;
+/** Try to enter the nearest car (E). Stealing a civilian car adds heat. */
+export function tryEnterCar(state) {
+  const p = state.player;
+  if (!p.onFoot) return false;
+  const car = nearestCar(state, p.x, p.y, 78);
   if (!car) return false;
-  const axis = input.axis();
-  // Forward is W / Up, reverse S / Down, steer A/D.
-  if (axis.y < 0) car.speed += CAR_ACCEL * dt;
-  else if (axis.y > 0) car.speed -= (car.speed > 0 ? CAR_BRAKE : CAR_ACCEL * 0.5) * dt;
-  else car.speed -= car.speed * CAR_DRAG * dt;
-  car.speed = clamp(car.speed, -CAR_REVERSE, CAR_MAX);
-  const steer = axis.x;
-  const grip = clamp(Math.abs(car.speed) / 120, 0, 1);
-  car.angle += steer * CAR_TURN * grip * dt * Math.sign(car.speed || 1);
+  p.onFoot = false;
+  p.carId = car.id;
+  car.player = true;
+  car.parked = false;
+  car.civilian = false;
+  if (!car.stolen) {
+    car.stolen = true;
+    state.stats.steals += 1;
+    addHeat(state, WANTED.stealHeat);
+    setTicker(state, `BREAKING: ${car.special ? 'Pink Comet GT' : 'A car'} stolen live on Avenida del Sol — viewers are pouring in`);
+    burst(state, car.x, car.y, '#ffd94d', 10, 160);
+  }
+  p.angle = car.angle;
+  return true;
+}
+
+/** Step out of the car (E) onto the roadside. */
+export function exitCar(state) {
+  const p = state.player;
+  const car = playerCar(state);
+  if (p.onFoot || !car) return false;
+  p.onFoot = true;
+  p.carId = null;
+  car.player = false;
+  car.speed = 0;
+  const side = car.angle + Math.PI / 2;
+  const pos = resolveCircle(state, car.x + Math.cos(side) * 46, car.y + Math.sin(side) * 46, PLAYER.radius);
+  p.x = pos.x;
+  p.y = pos.y;
+  p.angle = car.angle;
+  p.speed = 0;
+  return true;
+}
+
+/** Add wanted heat; stars and the viewer count follow from it. */
+export function addHeat(state, amount) {
+  state.wanted.heat = Math.min(520, state.wanted.heat + amount);
+}
+
+/** One step for the player, on foot or behind the wheel. */
+export function stepPlayer(state, dt, input, actions) {
+  const p = state.player;
+  const mx = input.moveX();
+  const my = input.moveY();
+  p.moving = mx !== 0 || my !== 0;
+  if (p.onFoot) {
+    const len = Math.hypot(mx, my) || 1;
+    const vx = (mx / len) * PLAYER.walkSpeed;
+    const vy = (my / len) * PLAYER.walkSpeed;
+    if (p.moving) p.angle = Math.atan2(vy, vx);
+    const pos = resolveCircle(state, p.x + vx * dt, p.y + vy * dt, PLAYER.radius);
+    p.x = pos.x;
+    p.y = pos.y;
+    p.speed = p.moving ? PLAYER.walkSpeed : 0;
+    if (p.punchT > 0) p.punchT -= dt;
+  } else {
+    stepPlayerCar(state, dt, mx, my, actions);
+  }
+}
+
+function stepPlayerCar(state, dt, mx, my, actions) {
+  const p = state.player;
+  const car = playerCar(state);
+  if (!car) {
+    p.onFoot = true;
+    return;
+  }
+  // Space is a one-shot nitro pulse behind the wheel (a punch on foot).
+  const boostPulse = (actions & 8) !== 0 && p.boost > 20;
+  const throttle = my < 0 ? 1 : my > 0 ? -0.55 : 0;
+  const maxSpeed = CAR.maxSpeed;
+  if (throttle > 0) car.speed += CAR.accel * dt;
+  else if (throttle < 0) car.speed -= (car.speed > 0 ? CAR.brake : CAR.accel * 0.6) * dt;
+  else car.speed -= Math.sign(car.speed) * 260 * dt;
+  if (boostPulse) {
+    car.speed = Math.min(maxSpeed * 1.4, car.speed + 230);
+    p.boost = Math.max(0, p.boost - 30);
+    burst(state, car.x, car.y, '#19c2d8', 8, 200);
+  } else {
+    p.boost = Math.min(CAR.boostMax, p.boost + CAR.boostRegen * dt);
+  }
+  car.speed = clamp(car.speed, -CAR.reverseMax, maxSpeed);
+  if (Math.abs(car.speed) < 4 && throttle === 0) car.speed = 0;
+  const steer = mx * CAR.turn * clamp(Math.abs(car.speed) / 220, 0, 1) * (car.speed >= 0 ? 1 : -1);
+  car.angle += steer * dt;
   const nx = car.x + Math.cos(car.angle) * car.speed * dt;
   const ny = car.y + Math.sin(car.angle) * car.speed * dt;
-  // Collide with buildings: try x then y so the car slides along walls.
-  const r = 20;
-  if (!isBlockedAt(state.world, nx, car.y, r)) car.x = nx;
-  else car.speed *= 0.55;
-  if (!isBlockedAt(state.world, car.x, ny, r)) car.y = ny;
-  else car.speed *= 0.55;
-  car.x = clamp(car.x, 24, WORLD_W - 24);
-  car.y = clamp(car.y, 24, WORLD_H - 24);
-  state.player.x = car.x;
-  state.player.y = car.y;
-  state.player.angle = car.angle;
-  // Roadblock collision: a hard stop + damage.
-  for (const block of state.police.blocks) {
-    if (Math.hypot(car.x - block.x, car.y - block.y) < 52 && Math.abs(car.speed) > 60) {
-      car.speed *= -0.25;
-      state.player.health -= 6;
-      state.audio.thud();
-      spawnCrash(state, car.x, car.y);
+  const pos = resolveCircle(state, nx, ny, CAR.radius);
+  if (pos.x !== nx || pos.y !== ny) {
+    // Bumped a building: lose speed and throw sparks.
+    if (Math.abs(car.speed) > 120) burst(state, nx, ny, '#ffd94d', 6, 140);
+    car.speed *= 0.45;
+  }
+  car.x = pos.x;
+  car.y = pos.y;
+  p.x = car.x;
+  p.y = car.y;
+  p.angle = car.angle;
+  p.speed = Math.abs(car.speed);
+  // Speeding past the law while already hot adds heat.
+  if (Math.abs(car.speed) > 430 && state.wanted.stars >= 1) {
+    state.wanted.heat = Math.min(520, state.wanted.heat + WANTED.speedHeat * dt);
+  }
+}
+
+/** Keep two cars from overlapping: a soft push apart, for traffic bumps. */
+export function separateCars(state) {
+  const cars = state.cars;
+  for (let i = 0; i < cars.length; i += 1) {
+    for (let j = i + 1; j < cars.length; j += 1) {
+      const a = cars[i];
+      const b = cars[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d2 = dx * dx + dy * dy;
+      const min = 44;
+      if (d2 < min * min && d2 > 0.01) {
+        const d = Math.sqrt(d2);
+        const push = (min - d) / 2;
+        const ux = dx / d;
+        const uy = dy / d;
+        if (!a.parked) {
+          a.x -= ux * push;
+          a.y -= uy * push;
+        }
+        if (!b.parked) {
+          b.x += ux * push;
+          b.y += uy * push;
+        }
+      }
     }
   }
-  const drifting = Math.abs(steer) > 0.6 && Math.abs(car.speed) > 240;
-  if (drifting && state.rng() < 0.6) {
-    state.particles.push({
-      x: car.x - Math.cos(car.angle) * 26,
-      y: car.y - Math.sin(car.angle) * 26,
-      vx: (state.rng() - 0.5) * 30,
-      vy: (state.rng() - 0.5) * 30,
-      life: 0.5,
-      maxLife: 0.5,
-      size: 10,
-      color: 'rgba(200,200,200,0.6)',
-      kind: 'smoke',
-    });
-  }
-  return drifting;
-}
-
-function spawnCrash(state, x, y) {
-  for (let i = 0; i < 10; i++) {
-    state.particles.push({
-      x,
-      y,
-      vx: (state.rng() - 0.5) * 260,
-      vy: (state.rng() - 0.5) * 260,
-      life: 0.5,
-      maxLife: 0.5,
-      size: 5,
-      color: '#ffd166',
-      kind: 'spark',
-    });
-  }
-}
-
-/** Draw the player's car (with a gold outline so it reads as "yours"). */
-export function drawPlayerCar(ctx, state) {
-  const car = state.player.car;
-  if (!car) return;
-  ctx.save();
-  ctx.strokeStyle = '#ffb703';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.arc(car.x, car.y, 42, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-  drawCarShape(ctx, car.x, car.y, car.angle, car.color, car.kind, false, state.time);
-}
-
-/** A fresh player car colour, cycling the hero palette. */
-export function nextPlayerCarColor(state) {
-  return PLAYER_CAR_COLORS[state.stats.episodesDone % PLAYER_CAR_COLORS.length];
 }

@@ -1,14 +1,15 @@
-// LIVE HEIST — world.js
-// Costa Vidrio: the map itself. Seeded generation of avenues, streets, blocks,
-// buildings, shops, parks, the beach, the hideout garage and the alleys where a
-// broadcast dies ("putus siaran"). Also collision queries and the ground drawing.
+// Costa Vidrio: the city itself. Builds the road grid, the blocks between
+// the roads, the buildings, shops, alleys and garages, and holds the whole
+// simulation state. Every other module reads or steps this one state object.
+// A "safe zone" (alley or garage) is where the live broadcast is cut:
+// standing in one drops the wanted heat, which the HUD shows as SIGNAL LOST.
 
-import { AVENUES, BEACH_ROW, COLS, PALETTE, ROWS, SEA_ROW, STREETS, TILE, WORLD_H, WORLD_W, clamp } from './config.js';
+import { CAR, PALETTE, PLAYER, POLICE, ROAD_W, ROAD_X, ROAD_Y, STEP, TICKER_LINES, WANTED, WORLD } from './config.js';
 
-/** Deterministic PRNG (mulberry32). Same seed, same city, every run. */
-export function createRandom(seed) {
+/** Small deterministic generator: the same seed always builds the same city. */
+export function mulberry32(seed) {
   let a = seed >>> 0;
-  return function random() {
+  return function next() {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -17,317 +18,383 @@ export function createRandom(seed) {
   };
 }
 
-const BUILDING_COLORS = [
-  PALETTE.buildingOrange,
-  PALETTE.buildingCyan,
-  PALETTE.buildingPink,
-  PALETTE.buildingYellow,
-  PALETTE.buildingCream,
-  PALETTE.buildingTeal,
-];
-
-const SHOP_NAMES = [
-  'TOKO SARI',
-  'KOPI VIDRIO',
-  'BAKSO 88',
-  'BENGKEL RIZKI',
-  'HOTEL MIRAMAR',
-  'PASAR SENJA',
-  'LAUNDRY LUNA',
-  'WARUNG OMBAK',
-  'CELLULAR NUSA',
-  'ROTI PANAS',
-  'BARBERSHOP 21',
-  'FOTO CERIA',
-];
-
-const PARK_NAMES = ['TAMAN OMBAX', 'TAMAN MERDEKA'];
-
-/** Pixel rect of a road. Roads are 2 tiles wide. */
-function roadRect(axis, index) {
-  if (axis === 'v') return { x: AVENUES[index] * TILE, y: 0, w: TILE * 2, h: BEACH_ROW * TILE };
-  return { x: 0, y: STREETS[index] * TILE, w: WORLD_W, h: TILE * 2 };
+export function clamp(value, min, max) {
+  return value < min ? min : value > max ? max : value;
 }
 
-/** True when the point is on a road (asphalt). */
-export function isRoadAt(world, x, y) {
-  for (const r of world.roads) {
-    if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
-  }
+export function dist2(ax, ay, bx, by) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return dx * dx + dy * dy;
+}
+
+function angleTo(ax, ay, bx, by) {
+  return Math.atan2(by - ay, bx - ax);
+}
+
+function angleDiff(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+/** Is this point on a road (including the sidewalk strip beside it)? */
+export function onRoad(x, y) {
+  const half = ROAD_W / 2;
+  for (const rx of ROAD_X) if (Math.abs(x - rx) <= half) return true;
+  for (const ry of ROAD_Y) if (Math.abs(y - ry) <= half) return true;
   return false;
 }
 
-/** True when the point is inside the sea (impassable water). */
-export function isSeaAt(world, x, y) {
-  return y >= SEA_ROW * TILE;
-}
-
-/** True when a circle of radius r at (x, y) touches a building, the sea, or the map edge. */
-export function isBlockedAt(world, x, y, r) {
-  if (x < r || y < r || x > WORLD_W - r || y > WORLD_H - r) return true;
-  if (isSeaAt(world, x, y)) return true;
-  for (const b of world.buildings) {
-    if (x + r > b.x && x - r < b.x + b.w && y + r > b.y && y - r < b.y + b.h) return true;
+/** The nearest road centre line, for traffic that has to stay on the grid. */
+export function nearestRoad(x, y) {
+  let best = { axis: 'v', at: ROAD_X[0], d: Infinity };
+  for (const rx of ROAD_X) {
+    const d = Math.abs(x - rx);
+    if (d < best.d) best = { axis: 'v', at: rx, d };
   }
-  return false;
-}
-
-/** True when the point is inside a rect. */
-export function pointInRect(x, y, r) {
-  return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
-}
-
-/** True when the player is in a hideout: the garage or an alley. Heat drains fast there. */
-export function isHideoutAt(world, x, y) {
-  if (pointInRect(x, y, world.garage)) return true;
-  for (const a of world.alleys) if (pointInRect(x, y, a)) return true;
-  return false;
-}
-
-/** A random point on a road, centred in a lane that matches the driving direction. */
-export function randomRoadPoint(world, rng) {
-  const dir = rng() < 0.5 ? 1 : -1;
-  if (rng() < 0.5) {
-    const i = Math.floor(rng() * AVENUES.length);
-    const a = AVENUES[i];
-    // Southbound (dir 1) takes the west lane, northbound the east lane.
-    return { x: (a + (dir > 0 ? 0.5 : 1.5)) * TILE, y: rng() * BEACH_ROW * TILE, axis: 'v', dir, road: a };
+  for (const ry of ROAD_Y) {
+    const d = Math.abs(y - ry);
+    if (d < best.d) best = { axis: 'h', at: ry, d };
   }
-  const i = Math.floor(rng() * STREETS.length);
-  const s = STREETS[i];
-  // Eastbound (dir 1) takes the south lane, westbound the north lane.
-  return { x: rng() * WORLD_W, y: (s + (dir > 0 ? 1.5 : 0.5)) * TILE, axis: 'h', dir, road: s };
+  return best;
 }
 
-/** A random sidewalk point (block edge), for spawning pedestrians. */
-export function randomSidewalkPoint(world, rng) {
-  const block = world.blocks[Math.floor(rng() * world.blocks.length)];
-  const side = Math.floor(rng() * 4);
-  const m = 10;
-  if (side === 0) return { x: block.x + rng() * block.w, y: block.y - m };
-  if (side === 1) return { x: block.x + rng() * block.w, y: block.y + block.h + m };
-  if (side === 2) return { x: block.x - m, y: block.y + rng() * block.h };
-  return { x: block.x + block.w + m, y: block.y + rng() * block.h };
-}
-
-/** Build the whole city from a seed. */
-export function createWorld(seed) {
-  const rng = createRandom(seed);
-  const roads = [];
-  for (let i = 0; i < AVENUES.length; i++) roads.push(roadRect('v', i));
-  for (let i = 0; i < STREETS.length; i++) roads.push(roadRect('h', i));
-
-  // City blocks: the rectangles between roads. Boundaries alternate road-edge /
-  // block-edge: a road at tile a occupies a and a+1, so the block after it starts
-  // at a+2 and ends at the next road's a. Blocks are consecutive PAIRS of the
-  // boundary list — never the road strip itself.
-  const xs = [0];
-  for (const a of AVENUES) xs.push(a, a + 2);
-  xs.push(COLS);
-  const ys = [0];
-  for (const s of STREETS) ys.push(s, s + 2);
-  ys.push(BEACH_ROW);
-  const blocks = [];
-  for (let i = 0; i < xs.length - 1; i += 2) {
-    for (let j = 0; j < ys.length - 1; j += 2) {
-      const x = xs[i] * TILE;
-      const y = ys[j] * TILE;
-      const w = (xs[i + 1] - xs[i]) * TILE;
-      const h = (ys[j + 1] - ys[j]) * TILE;
-      if (w > TILE * 2 && h > TILE * 2) blocks.push({ x, y, w, h });
-    }
-  }
-
-  // Hideout garage: a wide low building inside the block between avenue 29
-  // and street 25 (never on a road). Alleys: narrow walkable gaps inside blocks.
-  const garage = { x: 24 * TILE, y: 20 * TILE, w: TILE * 3, h: TILE * 2, name: 'GARASI VIDRIO' };
-  const alleys = [
-    { x: 8 * TILE, y: 13 * TILE, w: TILE, h: TILE * 4 },
-    { x: 24 * TILE, y: 6 * TILE, w: TILE, h: TILE * 4 },
-    { x: 32 * TILE, y: 20 * TILE, w: TILE, h: TILE * 4 },
-  ];
-  const noBuild = [garage, ...alleys].map((r) => ({ x: r.x - 16, y: r.y - 16, w: r.w + 32, h: r.h + 32 }));
-  const overlapsNoBuild = (r) => noBuild.some((n) => r.x < n.x + n.w && r.x + r.w > n.x && r.y < n.y + n.h && r.y + r.h > n.y);
-
+function buildCity(rng) {
   const buildings = [];
   const shops = [];
-  const parks = [];
-  let shopName = 0;
-  for (let bi = 0; bi < blocks.length; bi++) {
-    const b = blocks[bi];
-    const roll = rng();
-    if (roll < 0.14) {
-      // Park block: green, trees, no buildings.
-      parks.push({ x: b.x, y: b.y, w: b.w, h: b.h, name: PARK_NAMES[bi % PARK_NAMES.length] });
-      continue;
+  const palms = [];
+  // Blocks are the rectangles between neighbouring roads: the bounds list
+  // holds each road's near and far edge, so block i spans bounds[2i]..bounds[2i+1].
+  const xBounds = [0, ...ROAD_X.flatMap((x) => [x - ROAD_W / 2, x + ROAD_W / 2]), WORLD.width];
+  const yBounds = [0, ...ROAD_Y.flatMap((y) => [y - ROAD_W / 2, y + ROAD_W / 2]), WORLD.height];
+  for (let bx = 0; bx < xBounds.length / 2; bx += 1) {
+    for (let by = 0; by < yBounds.length / 2; by += 1) {
+      const x0 = xBounds[bx * 2] + 14;
+      const y0 = yBounds[by * 2] + 14;
+      const x1 = xBounds[bx * 2 + 1] - 14;
+      const y1 = yBounds[by * 2 + 1] - 14;
+      const w = x1 - x0;
+      const h = y1 - y0;
+      if (w < 60 || h < 60) continue;
+      // The beach strip on the east edge stays open sand, no buildings.
+      if (x0 > 2900) continue;
+      const count = w > 200 && h > 160 ? 2 : 1;
+      for (let i = 0; i < count; i += 1) {
+        const bw = 60 + rng() * Math.max(40, w / count - 80);
+        const bh = 60 + rng() * Math.max(40, h - 80);
+        const px = x0 + (count === 1 ? (w - bw) / 2 : i * (w / count) + 10 + rng() * 20);
+        const py = y0 + (h - bh) / 2 + (rng() - 0.5) * 20;
+        buildings.push({
+          x: px,
+          y: py,
+          w: bw,
+          h: bh,
+          color: PALETTE.building[Math.floor(rng() * PALETTE.building.length)],
+          roof: rng() < 0.5,
+        });
+      }
+      if (rng() < 0.55) {
+        palms.push({ x: x0 + 20 + rng() * (w - 40), y: y0 + 20 + rng() * (h - 40), s: 0.8 + rng() * 0.5 });
+      }
     }
-    // 1-3 buildings per block, leaving a walkable alley gap in some blocks.
-    const count = 1 + Math.floor(rng() * 3);
-    const bw = b.w / count;
-    for (let k = 0; k < count; k++) {
-      const pad = 14 + rng() * 10;
-      const bx = b.x + k * bw + pad;
-      const by = b.y + pad;
-      const bw2 = bw - pad * 2;
-      const bh = b.h - pad * 2 - (rng() < 0.35 ? TILE : 0);
-      if (bw2 < TILE || bh < TILE) continue;
-      if (overlapsNoBuild({ x: bx, y: by, w: bw2, h: bh })) continue;
-      const color = BUILDING_COLORS[Math.floor(rng() * BUILDING_COLORS.length)];
-      const isShop = rng() < 0.42 && shopName < SHOP_NAMES.length;
-      const building = {
-        x: bx,
-        y: by,
-        w: bw2,
-        h: bh,
-        color,
-        kind: isShop ? 'shop' : 'building',
-        name: isShop ? SHOP_NAMES[shopName++] : '',
-        floors: 1 + Math.floor(rng() * 3),
-      };
-      buildings.push(building);
-      if (isShop) shops.push(building);
-    }
   }
-
-  buildings.push({ ...garage, color: PALETTE.garage, kind: 'garage', floors: 1 });
-
-  // Deterministic palm trees along sidewalks and the beach.
-  const trees = [];
-  for (let i = 0; i < 46; i++) {
-    const p = randomSidewalkPoint({ blocks }, rng);
-    trees.push({ x: clamp(p.x, 20, WORLD_W - 20), y: clamp(p.y, 20, WORLD_H - 20) });
+  // Named shopfronts along the sunny main avenue (Avenida del Sol, y = 1000).
+  const shopNames = ['TACO VIDA', 'SURF SHOP', 'NEON DONUTS', 'VIDRIO TV', 'HOTEL PALMA', 'CAFÉ SOL'];
+  for (let i = 0; i < shopNames.length; i += 1) {
+    shops.push({ x: 480 + i * 380, y: 1090, w: 150, h: 54, name: shopNames[i], color: PALETTE.building[i % PALETTE.building.length] });
   }
-  for (let i = 0; i < 12; i++) {
-    trees.push({ x: 60 + rng() * (WORLD_W - 120), y: (BEACH_ROW + 0.4 + rng() * 0.5) * TILE });
-  }
+  // Alleys: narrow cuts through blocks where the broadcast drops.
+  const alleys = [
+    { x: 1450, y: 470, w: 44, h: 460, name: 'GANG MATAHARI' },
+    { x: 2050, y: 1070, w: 44, h: 460, name: 'GANG SIARAN' },
+    { x: 850, y: 1670, w: 44, h: 330, name: 'GANG SENJA' },
+  ];
+  // Garages: drive or walk in to cut the broadcast ("putus siaran").
+  const garages = [
+    { x: 560, y: 560, w: 190, h: 130, name: 'GARASI RICO' },
+    { x: 2360, y: 560, w: 190, h: 130, name: 'GARASI LUNA' },
+  ];
+  return { buildings, shops, palms, alleys, garages };
+}
 
-  // Mission anchors: the drop point (east pier road) and the robbery shop (TOKO SARI).
-  const drop = { x: 38.5 * TILE, y: 18.5 * TILE };
-  const tokoSari = shops.find((s) => s.name === 'TOKO SARI') ?? shops[0] ?? buildings[0];
-
+/** A parked civilian car the player can steal, placed beside a road. */
+function makeParkedCar(rng, x, y, angle, color, special) {
   return {
-    seed,
-    roads,
-    blocks,
-    buildings,
-    shops,
-    parks,
-    trees,
-    alleys,
-    garage,
-    drop,
-    tokoSari,
-    spawn: { x: 6.5 * TILE, y: 5.5 * TILE },
-    beach: { x: 0, y: BEACH_ROW * TILE, w: WORLD_W, h: TILE },
-    sea: { x: 0, y: SEA_ROW * TILE, w: WORLD_W, h: WORLD_H - SEA_ROW * TILE },
+    id: 0, x, y, angle, speed: 0, color, civilian: true, parked: true, player: false,
+    hp: 100, special: special ?? null, honkT: 0,
   };
 }
 
-/** Draw the ground: grass, beach, sea, roads, lane dashes, parks, alleys, garage. */
-export function drawWorld(ctx, world, cam, time) {
-  // Base grass.
-  ctx.fillStyle = PALETTE.grass;
-  ctx.fillRect(cam.x, cam.y, cam.w, cam.h);
-  // Beach + sea.
-  ctx.fillStyle = PALETTE.sand;
-  ctx.fillRect(Math.max(cam.x, 0), world.beach.y, Math.min(cam.w, WORLD_W), world.beach.h);
-  const wave = Math.sin(time * 1.4) * 4;
-  ctx.fillStyle = PALETTE.sea;
-  ctx.fillRect(Math.max(cam.x, 0), world.sea.y + wave, Math.min(cam.w, WORLD_W), world.sea.h);
-  ctx.fillStyle = PALETTE.seaDeep;
-  for (let i = 0; i < 5; i++) {
-    const wy = world.sea.y + 30 + i * 46 + wave * (i % 2 === 0 ? 1 : -1);
-    ctx.fillRect(Math.max(cam.x, 0), wy, Math.min(cam.w, WORLD_W), 5);
+/** Create a fresh simulation state for one seed. */
+export function createWorld(seed) {
+  const rng = mulberry32(seed);
+  const city = buildCity(rng);
+  const state = {
+    seed,
+    rng,
+    time: 0,
+    screen: 'title',
+    shot: null,
+    player: {
+      x: 1000, y: 930, angle: -Math.PI / 2, speed: 0, onFoot: true, carId: null,
+      hp: PLAYER.hp, punchT: 0, punchHit: false, boost: CAR.boostMax, bustedT: 0, moving: false,
+    },
+    camera: { x: 1000, y: 930 },
+    cars: [],
+    peds: [],
+    police: [],
+    heli: { x: 1000, y: 700, active: false, angle: 0, rotor: 0 },
+    roadblocks: [],
+    effects: [],
+    floaters: [],
+    wanted: { stars: 0, heat: 0, viewers: WANTED.baseViewers, signalLost: 0, lostFlash: 0 },
+    mission: { id: 0, stage: 0, done: false, completeT: 0, marker: null, markerText: '', lootT: 0 },
+    progress: { cash: 0, followers: WANTED.baseViewers, episode: 0, sponsor: '', bestViewers: WANTED.baseViewers },
+    ticker: { text: TICKER_LINES[0], offset: 0, flash: '' },
+    stats: { steals: 0, punches: 0, chases: 0, episodesDone: 0 },
+    buildings: city.buildings,
+    shops: city.shops,
+    palms: city.palms,
+    alleys: city.alleys,
+    garages: city.garages,
+    events: 0,
+    muted: false,
+  };
+  resetWorld(state);
+  return state;
+}
+
+/** Put the player, traffic, pedestrians and parked cars back at their starts. */
+export function resetWorld(state) {
+  const rng = state.rng;
+  state.time = 0;
+  state.player.x = 1000;
+  state.player.y = 930;
+  state.player.angle = -Math.PI / 2;
+  state.player.speed = 0;
+  state.player.onFoot = true;
+  state.player.carId = null;
+  state.player.hp = PLAYER.hp;
+  state.player.punchT = 0;
+  state.player.boost = CAR.boostMax;
+  state.player.bustedT = 0;
+  state.camera.x = 1000;
+  state.camera.y = 930;
+  state.cars = [];
+  state.peds = [];
+  state.police = [];
+  state.roadblocks = [];
+  state.effects = [];
+  state.floaters = [];
+  state.heli.active = false;
+  state.wanted.stars = 0;
+  state.wanted.heat = 0;
+  state.wanted.viewers = WANTED.baseViewers;
+  state.wanted.signalLost = 0;
+  state.wanted.lostFlash = 0;
+  state.mission.id = 0;
+  state.mission.stage = 0;
+  state.mission.done = false;
+  state.mission.completeT = 0;
+  state.mission.marker = null;
+  state.mission.markerText = '';
+  state.events = 0;
+  let id = 1;
+  // Parked cars along the avenues, including the pink Comet GT (episode 2).
+  const parked = [
+    makeParkedCar(rng, 1075, 700, Math.PI / 2, '#ff5fa2', 'COMET GT'),
+    makeParkedCar(rng, 925, 1300, -Math.PI / 2, '#19c2d8'),
+    makeParkedCar(rng, 1675, 700, Math.PI / 2, '#ffb347'),
+    makeParkedCar(rng, 2275, 1300, -Math.PI / 2, '#f2e394'),
+    makeParkedCar(rng, 475, 1700, 0, '#7dd069'),
+    makeParkedCar(rng, 2875, 700, Math.PI, '#8e7cf3'),
+  ];
+  for (const car of parked) {
+    car.id = id;
+    id += 1;
+    state.cars.push(car);
   }
-
-  // Sidewalk halo around blocks, then roads.
-  ctx.fillStyle = PALETTE.sidewalk;
-  for (const b of world.blocks) ctx.fillRect(b.x - 8, b.y - 8, b.w + 16, b.h + 16);
-  ctx.fillStyle = PALETTE.road;
-  for (const r of world.roads) ctx.fillRect(r.x, r.y, r.w, r.h);
-
-  // Lane dashes.
-  ctx.fillStyle = PALETTE.roadLine;
-  for (let i = 0; i < AVENUES.length; i++) {
-    const cx = (AVENUES[i] + 1) * TILE;
-    for (let y = 0; y < BEACH_ROW * TILE; y += 56) ctx.fillRect(cx - 2, y + 8, 4, 28);
+  // Moving traffic on the roads.
+  for (let i = 0; i < 10; i += 1) {
+    const vertical = rng() < 0.5;
+    const road = vertical ? ROAD_X[Math.floor(rng() * ROAD_X.length)] : ROAD_Y[Math.floor(rng() * ROAD_Y.length)];
+    const along = 100 + rng() * 2200;
+    const dir = rng() < 0.5 ? 1 : -1;
+    const lane = (rng() < 0.5 ? -35 : 35);
+    const car = {
+      id,
+      x: vertical ? road + lane : along,
+      y: vertical ? along : road + lane,
+      angle: vertical ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI),
+      speed: 130 + rng() * 90,
+      color: PALETTE.car[Math.floor(rng() * PALETTE.car.length)],
+      civilian: true, parked: false, player: false, hp: 100, special: null, honkT: 0,
+      axis: vertical ? 'v' : 'h', dir, road,
+    };
+    id += 1;
+    state.cars.push(car);
   }
-  for (let i = 0; i < STREETS.length; i++) {
-    const cy = (STREETS[i] + 1) * TILE;
-    for (let x = 0; x < WORLD_W; x += 56) ctx.fillRect(x + 8, cy - 2, 28, 4);
+  // Pedestrians on the sidewalks.
+  for (let i = 0; i < 16; i += 1) {
+    const road = ROAD_X[Math.floor(rng() * ROAD_X.length)];
+    state.peds.push({
+      x: road + (rng() < 0.5 ? -95 : 95),
+      y: 150 + rng() * 2100,
+      angle: rng() * Math.PI * 2,
+      speed: 34 + rng() * 26,
+      tx: 0, ty: 0,
+      color: PALETTE.ped[Math.floor(rng() * PALETTE.ped.length)],
+      recording: false, recT: 0, phoneUp: false,
+    });
+    const ped = state.peds[state.peds.length - 1];
+    pickPedTarget(state, ped);
   }
+  state.nextCarId = id;
+}
 
-  // Parks.
-  for (const p of world.parks) {
-    ctx.fillStyle = PALETTE.park;
-    ctx.fillRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    ctx.font = 'bold 15px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(p.name, p.x + p.w / 2, p.y + p.h / 2);
+/** A new random sidewalk destination for a pedestrian. */
+export function pickPedTarget(state, ped) {
+  const road = ROAD_X[Math.floor(state.rng() * ROAD_X.length)];
+  ped.tx = road + (state.rng() < 0.5 ? -95 : 95);
+  ped.ty = 150 + state.rng() * 2100;
+  ped.angle = angleTo(ped.x, ped.y, ped.tx, ped.ty);
+}
+
+/** The building at this point, or null. */
+export function buildingAt(state, x, y) {
+  for (const b of state.buildings) {
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b;
   }
+  for (const s of state.shops) {
+    if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) return s;
+  }
+  return null;
+}
 
-  // Alleys (darker walkable gaps).
-  ctx.fillStyle = 'rgba(43, 47, 58, 0.55)';
-  for (const a of world.alleys) ctx.fillRect(a.x, a.y, a.w, a.h);
-
-  // Buildings: shadow, facade, roof line, windows, shop signs.
-  for (const b of world.buildings) {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
-    ctx.fillRect(b.x + 6, b.y + 8, b.w, b.h);
-    ctx.fillStyle = b.color;
-    ctx.fillRect(b.x, b.y, b.w, b.h);
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(b.x + 1.5, b.y + 1.5, b.w - 3, b.h - 3);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    const cols = Math.max(1, Math.floor(b.w / 34));
-    const rows = Math.max(1, Math.floor(b.h / 34));
-    for (let cx = 0; cx < cols; cx++) {
-      for (let cy = 0; cy < rows; cy++) {
-        ctx.fillRect(b.x + 10 + cx * 34, b.y + 10 + cy * 34, 16, 12);
+/** Push a circle out of every building and shop it overlaps; returns the fixed position. */
+export function resolveCircle(state, x, y, r) {
+  for (const b of [...state.buildings, ...state.shops]) {
+    const cx = clamp(x, b.x, b.x + b.w);
+    const cy = clamp(y, b.y, b.y + b.h);
+    const dx = x - cx;
+    const dy = y - cy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < r * r) {
+      if (d2 > 0.001) {
+        const d = Math.sqrt(d2);
+        x = cx + (dx / d) * r;
+        y = cy + (dy / d) * r;
+      } else {
+        // Dead centre: push out through the nearest side.
+        const left = x - b.x;
+        const right = b.x + b.w - x;
+        const top = y - b.y;
+        const bottom = b.y + b.h - y;
+        const m = Math.min(left, right, top, bottom);
+        if (m === left) x = b.x - r;
+        else if (m === right) x = b.x + b.w + r;
+        else if (m === top) y = b.y - r;
+        else y = b.y + b.h + r;
       }
     }
-    if (b.kind === 'shop') {
-      ctx.fillStyle = 'rgba(12, 16, 28, 0.85)';
-      ctx.fillRect(b.x, b.y - 4, b.w, 22);
-      ctx.fillStyle = '#ffd166';
-      ctx.font = 'bold 13px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(b.name, b.x + b.w / 2, b.y + 12);
-    }
-    if (b.kind === 'garage') {
-      ctx.fillStyle = '#f7ede2';
-      ctx.font = 'bold 16px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('GARASI VIDRIO', b.x + b.w / 2, b.y + b.h / 2 - 4);
-      ctx.font = '12px sans-serif';
-      ctx.fillText('PUTUS SIARAN DI SINI', b.x + b.w / 2, b.y + b.h / 2 + 16);
+  }
+  x = clamp(x, 20, WORLD.width - 20);
+  y = clamp(y, 20, WORLD.height - 20);
+  return { x, y };
+}
+
+/** True when the point is inside an alley or a garage: the broadcast is cut here. */
+export function inSafeZone(state, x, y) {
+  for (const a of state.alleys) {
+    if (x >= a.x && x <= a.x + a.w && y >= a.y && y <= a.y + a.h) return a;
+  }
+  for (const g of state.garages) {
+    if (x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h) return g;
+  }
+  return null;
+}
+
+/** The nearest parked or traffic car within `radius` of a point. */
+export function nearestCar(state, x, y, radius) {
+  let best = null;
+  let bestD = radius * radius;
+  for (const car of state.cars) {
+    if (car.player) continue;
+    const d = dist2(x, y, car.x, car.y);
+    if (d < bestD) {
+      bestD = d;
+      best = car;
     }
   }
+  return best;
+}
 
-  // Drop point marker base (a painted pier circle).
-  ctx.strokeStyle = PALETTE.gold;
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.arc(world.drop.x, world.drop.y, 34, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = 'rgba(255, 183, 3, 0.18)';
-  ctx.beginPath();
-  ctx.arc(world.drop.x, world.drop.y, 34, 0, Math.PI * 2);
-  ctx.fill();
+/** The player's car, if the player is driving one. */
+export function playerCar(state) {
+  if (!state.player.onFoot && state.player.carId !== null) {
+    return state.cars.find((c) => c.id === state.player.carId) ?? null;
+  }
+  return null;
+}
 
-  // Palm trees.
-  for (const t of world.trees) {
-    ctx.strokeStyle = '#7a5230';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(t.x, t.y);
-    ctx.lineTo(t.x + 3, t.y - 16);
-    ctx.stroke();
-    ctx.fillStyle = '#3f9e4d';
-    ctx.beginPath();
-    ctx.arc(t.x + 3, t.y - 20, 11, 0, Math.PI * 2);
-    ctx.fill();
+export function addEffect(state, x, y, vx, vy, life, color, size) {
+  state.effects.push({ x, y, vx, vy, life, maxLife: life, color, size });
+  if (state.effects.length > 220) state.effects.splice(0, state.effects.length - 220);
+}
+
+export function addFloater(state, x, y, text, color) {
+  state.floaters.push({ x, y, text, color: color ?? '#fff7e6', life: 1.4 });
+  if (state.floaters.length > 24) state.floaters.shift();
+}
+
+export function setTicker(state, text) {
+  state.ticker.text = text;
+  state.ticker.offset = 0;
+  state.ticker.flash = text;
+}
+
+export function burst(state, x, y, color, n, speed) {
+  for (let i = 0; i < n; i += 1) {
+    const a = state.rng() * Math.PI * 2;
+    const s = speed * (0.4 + state.rng() * 0.8);
+    addEffect(state, x, y, Math.cos(a) * s, Math.sin(a) * s, 0.4 + state.rng() * 0.4, color, 3 + state.rng() * 4);
   }
 }
+
+/** Advance the shared timers: effects, floaters, ticker scroll, camera. */
+export function stepWorld(state, dt) {
+  state.time += dt;
+  const p = state.player;
+  const car = playerCar(state);
+  const px = car ? car.x : p.x;
+  const py = car ? car.y : p.y;
+  // Camera eases toward the player and stays inside the city.
+  const tx = clamp(px - 640, 0, WORLD.width - 1280);
+  const ty = clamp(py - 360, 0, WORLD.height - 720);
+  state.camera.x += (tx - state.camera.x) * Math.min(1, dt * 5);
+  state.camera.y += (ty - state.camera.y) * Math.min(1, dt * 5);
+  for (let i = state.effects.length - 1; i >= 0; i -= 1) {
+    const e = state.effects[i];
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    e.vx *= 0.96;
+    e.vy *= 0.96;
+    e.life -= dt;
+    if (e.life <= 0) state.effects.splice(i, 1);
+  }
+  for (let i = state.floaters.length - 1; i >= 0; i -= 1) {
+    const f = state.floaters[i];
+    f.y -= 34 * dt;
+    f.life -= dt;
+    if (f.life <= 0) state.floaters.splice(i, 1);
+  }
+  state.ticker.offset += dt * 90;
+  const textWidth = state.ticker.text.length * 9 + 1400;
+  if (state.ticker.offset > textWidth) state.ticker.offset = -40;
+  if (state.wanted.lostFlash > 0) state.wanted.lostFlash -= dt;
+  state.heli.rotor += dt * 22;
+}
+
+export { angleTo, angleDiff, STEP };

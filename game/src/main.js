@@ -1,23 +1,25 @@
-// LIVE HEIST — main.js
-// Boot and the one loop: input is read every frame, the world advances in fixed
-// 1/60 s steps, and the renderer paints what is there. Screens: title, play,
-// paused, busted, season-complete. Save lives in localStorage.
+// LIVE HEIST — boot and the one loop. Input is read every frame, the world
+// advances in fixed 1/60 s steps (several in a slow frame, none in a fast
+// one), and the renderer paints what is there. The game moves between five
+// screens: title, play, paused, busted and episode-complete.
 //
-// ?shot=1..4 (with &seed=N) stages that scene instead of running the loop,
-// paints it twice and sets window.__shotReady for a screenshot.
+// ?seed=N fixes the city and the traffic. ?shot=1..4 (with &seed=N) stages
+// that scene instead of running the loop, paints it twice and sets
+// window.__shotReady for a screenshot. Progress is saved to localStorage.
 
-import { HEAT_STEAL_CAR, PLAYER_HEALTH, PLAYER_RADIUS, PLAYER_RUN, PLAYER_WALK, SAVE_KEY, STEP, WORLD_H, WORLD_W, clamp, dist } from './config.js';
-import { createRandom, createWorld, isBlockedAt } from './world.js';
-import { createTraffic, stepTraffic } from './traffic.js';
-import { enterOrExitCar, stepPlayerCar } from './vehicles.js';
-import { addHeat, createPolice, stepPolice } from './police.js';
-import { createHeli, stepHeli } from './heli.js';
-import { createMissions, startEpisode, stepMissions } from './missions.js';
-import { createCombat, doPunch, doShoot, stepCombat } from './combat.js';
-import { createAudio } from './audio.js';
-import { ACTION_CONFIRM, ACTION_ENTER_CAR, ACTION_MISSION, ACTION_PAUSE, ACTION_PUNCH, ACTION_SHOOT, createInput } from './input.js';
-import { SCREEN_COMPLETE, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, createRenderer, stepParticles } from './render.js';
+import { SAVE_KEY, STEP } from './config.js';
+import { createWorld, setTicker } from './world.js';
+import { createInput, ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH } from './input.js';
+import { createRenderer, SCREEN_BUSTED, SCREEN_COMPLETE, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
+import { stepPlayer, tryEnterCar, exitCar } from './vehicles.js';
+import { stepPedestrians, stepTrafficCars } from './traffic.js';
+import { EVENT_BUSTED, stepPolice, syncPolice, updateWanted } from './police.js';
+import { stepHeli } from './heli.js';
+import { EVENT_MISSION_DONE, startEpisode, stepMissions } from './missions.js';
+import { punch, stepCombat } from './combat.js';
+import { stepWorld } from './world.js';
+import { createAudio } from './audio.js';
 
 /** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
 const MAX_FRAME = 0.25;
@@ -29,201 +31,52 @@ const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() 
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const input = createInput(canvas);
-const audio = createAudio();
+const state = createWorld(seed);
 const renderer = createRenderer(canvas);
+const audio = createAudio();
 
-/** Build a fresh game state from a seed. */
-export function createGameState(seedValue) {
-  const rng = createRandom(seedValue);
-  const world = createWorld(seedValue);
-  const state = {
-    seed: seedValue,
-    rng,
-    world,
-    traffic: createTraffic(world, rng),
-    police: createPolice(),
-    heli: createHeli(),
-    missions: createMissions(world),
-    combat: createCombat(),
-    audio,
-    particles: [],
-    toasts: [],
-    ticker: [
-      'TV-7 COSTA VIDRIO — kota menyiarkanmu secara live',
-      'Cuaca cerah di Costa Vidrio, 32°C — lalu lintas padat di Avenida Vidrio',
-      'Sponsor hari ini: Kopi Vidrio — "Ngopi dulu, heist kemudian"',
-    ],
-    player: {
-      x: world.spawn.x,
-      y: world.spawn.y,
-      angle: 0,
-      health: PLAYER_HEALTH,
-      onFoot: true,
-      car: null,
-    },
-    stats: { cash: 250, followers: 1200, bestViewers: 0, episodesDone: 0 },
-    camera: { x: 0, y: 0, w: 1280, h: 720 },
-    time: 0,
-    ui: SCREEN_TITLE,
-    save: null,
-  };
-  state.saveGame = () => saveGame(state);
-  return state;
-}
+// Debug hook for play-testing: window.__LH is the live simulation state.
+window.__LH = state;
 
 function readSave() {
   try {
     const raw = window.localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number') return null;
-    return data;
+    const save = JSON.parse(raw);
+    if (typeof save.cash !== 'number' || typeof save.followers !== 'number') return null;
+    return save;
   } catch {
     return null;
   }
 }
 
-function saveGame(state) {
+function writeSave() {
   try {
-    window.localStorage.setItem(
-      SAVE_KEY,
-      JSON.stringify({
-        cash: state.stats.cash,
-        followers: state.stats.followers,
-        episodesDone: state.stats.episodesDone,
-        bestViewers: state.stats.bestViewers,
-      }),
-    );
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
+      cash: state.progress.cash,
+      followers: state.progress.followers,
+      episode: state.progress.episode,
+      bestViewers: state.progress.bestViewers,
+    }));
   } catch {
     // Storage can be off (private windows): progress then lasts this visit only.
   }
 }
 
-const state = createGameState(seed);
-state.save = readSave();
-if (state.save) {
-  state.stats.cash = state.save.cash;
-  state.stats.followers = state.save.followers;
-  state.stats.episodesDone = state.save.episodesDone;
-  state.stats.bestViewers = state.save.bestViewers ?? 0;
-}
-
-// Test hook: the smoke test drives the game through this handle.
-window.__liveheist = { state, version: 'live-heist-1' };
-
-function announce(message) {
-  status.textContent = message;
-}
-
-/** Fresh run: rebuild the city, keep the saved stats. */
-function startGame() {
-  const keep = { ...state.stats };
-  const fresh = createGameState(seed);
-  Object.assign(state, fresh, { stats: keep, save: state.save });
-  state.saveGame = () => saveGame(state);
-  state.ui = SCREEN_PLAY;
-  announce('Playing. Steal a car with E, press M to start the episode.');
-}
-
-function stepPlayerOnFoot(state, dt) {
-  const player = state.player;
-  const axis = input.axis();
-  if (axis.x !== 0 || axis.y !== 0) {
-    player.angle = Math.atan2(axis.y, axis.x);
-  }
-  const speed = input.running() ? PLAYER_RUN : PLAYER_WALK;
-  const nx = player.x + axis.x * speed * dt;
-  const ny = player.y + axis.y * speed * dt;
-  if (!isBlockedAt(state.world, nx, player.y, PLAYER_RADIUS)) player.x = nx;
-  if (!isBlockedAt(state.world, player.x, ny, PLAYER_RADIUS)) player.y = ny;
-  player.x = clamp(player.x, 16, WORLD_W - 16);
-  player.y = clamp(player.y, 16, WORLD_H - 16);
-}
-
-function step(state, dt) {
-  state.time += dt;
-  if (state.ui !== SCREEN_PLAY) return;
-  const actions = input.takeActions();
-  if (actions & ACTION_PAUSE) {
-    state.ui = SCREEN_PAUSED;
-    announce('Paused.');
-    return;
-  }
-  // M starts (or replays) the next episode (edge-triggered, so a quick tap counts).
-  if (actions & ACTION_MISSION && state.missions.active === null) {
-    const next = state.missions.done[0] && !state.missions.done[1] ? 1 : 0;
-    startEpisode(state, next);
-  }
-
-  // E steals / exits a car — unless the player is mid-robbery at the shop,
-  // where holding E is the robbery itself.
-  const shop = state.world.tokoSari;
-  const sdx = Math.max(shop.x - state.player.x, 0, state.player.x - (shop.x + shop.w));
-  const sdy = Math.max(shop.y - state.player.y, 0, state.player.y - (shop.y + shop.h));
-  const robbing =
-    state.missions.active === 1 &&
-    state.missions.stage === 1 &&
-    state.player.onFoot &&
-    Math.hypot(sdx, sdy) < 70;
-  if ((actions & ACTION_ENTER_CAR) && !robbing) {
-    const result = enterOrExitCar(state);
-    if (result === 'steal') {
-      addHeat(state, HEAT_STEAL_CAR, 'Pencurian mobil disiarkan live — penonton naik!');
-      audio.honk();
-      state.toasts.push({ text: 'Mobil dicuri! Polisi menuju lokasimu.', t: 3 });
-    } else if (result === 'exit') {
-      state.toasts.push({ text: 'Keluar mobil.', t: 1.5 });
-    }
-  }
-  if (actions & ACTION_PUNCH) doPunch(state);
-  if (actions & ACTION_SHOOT) {
-    const wx = input.mouse.x + state.camera.x;
-    const wy = input.mouse.y + state.camera.y;
-    doShoot(state, wx, wy);
-  }
-
-  if (state.player.car) stepPlayerCar(state, dt, input);
-  else stepPlayerOnFoot(state, dt);
-
-  stepTraffic(state, dt);
-  stepPolice(state, dt);
-  stepHeli(state, dt);
-  stepMissions(state, dt, input);
-  stepCombat(state, dt);
-  stepParticles(state, dt);
-
-  // Slow health regen when the heat is off.
-  if (state.police.stars === 0 && state.player.health < PLAYER_HEALTH) {
-    state.player.health = Math.min(PLAYER_HEALTH, state.player.health + 2 * dt);
-  }
-  for (let i = state.toasts.length - 1; i >= 0; i--) {
-    state.toasts[i].t -= dt;
-    if (state.toasts[i].t <= 0) state.toasts.splice(i, 1);
-  }
-
-  // Audio follows the wanted level and the car.
-  audio.siren(state.police.siren);
-  audio.engine(state.player.car ? Math.abs(state.player.car.speed) / 430 : 0);
-
-  if (state.player.health <= 0) {
-    state.ui = SCREEN_OVER;
-    saveGame(state);
-    announce(`Busted. ${state.stats.followers} followers. Press Enter to play again.`);
-    return;
-  }
-  if (state.missions.done.every(Boolean) && state.missions.active === null) {
-    state.ui = SCREEN_COMPLETE;
-    saveGame(state);
-    announce('Season 1 complete. Press Enter to keep roaming.');
-  }
+function applySave(save) {
+  if (!save) return;
+  state.progress.cash = save.cash;
+  state.progress.followers = save.followers;
+  state.progress.episode = save.episode ?? 0;
+  state.progress.bestViewers = Math.max(save.bestViewers ?? 0, state.progress.bestViewers);
+  state.stats.episodesDone = save.episode ?? 0;
 }
 
 function runShot(name) {
   const scene = stageShot(name, state);
   let painted = 0;
   function paint() {
-    renderer.draw(state);
+    renderer.draw(state, scene.screen);
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
@@ -232,64 +85,157 @@ function runShot(name) {
 }
 
 function runGame() {
+  const input = createInput(canvas);
+  let screen = SCREEN_TITLE;
   let accumulator = 0;
   let last = performance.now();
+  let pendingActions = 0;
+  applySave(readSave());
 
-  function handleActions() {
-    const actions = input.takeActions();
-    if (state.ui === SCREEN_TITLE && actions & ACTION_CONFIRM) {
-      audio.ensure();
-      startGame();
-    } else if (state.ui === SCREEN_OVER && actions & ACTION_CONFIRM) {
-      startGame();
-    } else if (state.ui === SCREEN_COMPLETE && actions & ACTION_CONFIRM) {
-      state.ui = SCREEN_PLAY;
-      announce('Free roam. Press M to replay an episode.');
-    } else if (state.ui === SCREEN_PAUSED && (actions & (ACTION_PAUSE | ACTION_CONFIRM))) {
-      state.ui = SCREEN_PLAY;
-      announce('Playing.');
+  // Screen readers (and anyone watching the page's text) hear the screen changes.
+  function announce(message) {
+    status.textContent = message;
+  }
+
+  function startEpisodePlay(id) {
+    state.mission.done = false;
+    startEpisode(state, id);
+    screen = SCREEN_PLAY;
+    announce(`Episode ${id}. ${state.mission.markerText}`);
+  }
+
+  function startGame() {
+    const save = readSave();
+    if (save && save.episode >= 1) startEpisodePlay(2);
+    else startEpisodePlay(1);
+  }
+
+  function endBusted() {
+    screen = SCREEN_BUSTED;
+    writeSave();
+    audio.busted();
+    announce('Busted. The cameras caught everything.');
+  }
+
+  function endEpisode() {
+    screen = SCREEN_COMPLETE;
+    writeSave();
+    audio.jingle();
+    announce(`Episode complete. ${state.progress.followers} followers.`);
+  }
+
+  function handleActions(actions) {
+    if (actions & ACTION_MUTE) {
+      state.muted = !state.muted;
+      audio.setMuted(state.muted);
+      return;
     }
+    if (screen === SCREEN_TITLE) {
+      if (actions & ACTION_CONFIRM) {
+        audio.unlock();
+        startGame();
+      }
+      return;
+    }
+    if (screen === SCREEN_BUSTED || screen === SCREEN_COMPLETE) {
+      if (actions & ACTION_CONFIRM) {
+        audio.unlock();
+        const next = state.mission.id >= 2 ? 1 : state.mission.id + 1;
+        startEpisodePlay(next);
+      }
+      return;
+    }
+    if (actions & ACTION_PAUSE) {
+      screen = screen === SCREEN_PLAY ? SCREEN_PAUSED : SCREEN_PLAY;
+      announce(screen === SCREEN_PAUSED ? 'Paused.' : 'Playing.');
+    }
+    // Interact and punch are handled inside step(), where the simulation
+    // takes the one-shot flags once per fixed step.
+  }
+
+  function step() {
+    if (screen === SCREEN_TITLE) {
+      // The city idles behind the title: traffic drives, people walk.
+      stepTrafficCars(state, STEP);
+      stepPedestrians(state, STEP);
+      stepWorld(state, STEP);
+      return;
+    }
+    if (screen !== SCREEN_PLAY) return;
+    // One-shot gameplay flags, taken once per frame by frame() and spent here.
+    const actions = pendingActions;
+    pendingActions = 0;
+    if (actions & ACTION_INTERACT) {
+      if (state.player.onFoot) {
+        if (tryEnterCar(state)) audio.steal();
+      } else {
+        exitCar(state);
+      }
+    }
+    if (actions & ACTION_PUNCH && state.player.onFoot) {
+      if (punch(state)) audio.punch();
+    }
+    stepPlayer(state, STEP, input, actions);
+    stepTrafficCars(state, STEP);
+    stepPedestrians(state, STEP);
+    updateWanted(state, STEP);
+    syncPolice(state);
+    const events = stepPolice(state, STEP);
+    stepHeli(state, STEP);
+    const missionEvents = stepMissions(state, STEP);
+    stepCombat(state, STEP);
+    stepWorld(state, STEP);
+    const car = state.cars.find((c) => c.id === state.player.carId);
+    audio.engine(car && !state.player.onFoot ? Math.abs(car.speed) : 0, !state.player.onFoot);
+    audio.siren(state.police.length > 0, state.time);
+    if (events & EVENT_BUSTED) endBusted();
+    else if (missionEvents & EVENT_MISSION_DONE) endEpisode();
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
     accumulator += Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
-    if (input.interacted()) audio.ensure();
-    if (state.ui === SCREEN_TITLE) {
-      state.time += Math.min(accumulator, 0.05);
-      accumulator = 0;
-      handleActions();
-    } else if (state.ui === SCREEN_PLAY) {
-      while (accumulator >= STEP) {
-        step(state, STEP);
+    // One consumer for the frame's one-shot presses: menus and pause here,
+    // interact and punch saved for the next fixed step.
+    const frameActions = input.takeActions();
+    handleActions(frameActions);
+    pendingActions |= frameActions & (ACTION_INTERACT | ACTION_PUNCH);
+    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
+      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
+        step();
         accumulator -= STEP;
-        if (state.ui !== SCREEN_PLAY) break;
       }
-      handleActions();
     } else {
       accumulator = 0;
-      handleActions();
+      pendingActions = 0;
     }
-    renderer.draw(state);
+    renderer.draw(state, screen);
   }
 
+  // Leaving the tab pauses a running game rather than letting the chase run unseen.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && state.ui === SCREEN_PLAY) {
-      state.ui = SCREEN_PAUSED;
+    if (document.hidden && screen === SCREEN_PLAY) {
+      screen = SCREEN_PAUSED;
       announce('Paused.');
     }
   });
 
-  window.addEventListener('resize', () => renderer.resize());
-  renderer.resize();
-  announce('LIVE HEIST. Press Enter or click to start.');
+  // Number keys pick an episode straight from the title screen.
+  window.addEventListener('keydown', (event) => {
+    if (screen !== SCREEN_TITLE) return;
+    if (event.code === 'Digit1') {
+      audio.unlock();
+      startEpisodePlay(1);
+    } else if (event.code === 'Digit2') {
+      audio.unlock();
+      startEpisodePlay(2);
+    }
+  });
+
+  announce('Live Heist. Press Enter to go live from Costa Vidrio.');
   requestAnimationFrame(frame);
 }
 
-if (shot) {
-  renderer.resize();
-  runShot(shot);
-} else {
-  runGame();
-}
+if (shot) runShot(shot);
+else runGame();

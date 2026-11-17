@@ -1,190 +1,129 @@
-// LIVE HEIST — missions.js
-// The episodes. Every heist is one TV episode with an objective chain and a
-// sponsor + follower reward. Episode 1: steal a car, deliver the package.
-// Episode 2: rob TOKO SARI, then lose the cops in the garage ("putus siaran").
-// Finishing both ends Season 1; episodes can be replayed for more followers.
+// Episodes: each heist is one TV episode with a clear objective chain and a
+// sponsor + follower reward — that is the progression. Episode 1 is the
+// Marina Vault grab; episode 2 is stealing the pink Comet GT for VIDRIO TV.
+// Finishing an episode pays cash and followers, cools the heat, and saves.
 
-import { HEAT_ROBBERY, clamp, dist, formatCount, formatMoney } from './config.js';
-import { addHeat, pushTicker } from './police.js';
-import { pointInRect } from './world.js';
+import { WANTED } from './config.js';
+import { addFloater, burst, dist2, playerCar, setTicker } from './world.js';
+import { addHeat } from './vehicles.js';
+import { coolDown } from './police.js';
 
-const EPISODES = [
+export const EVENT_MISSION_DONE = 2;
+
+/** The two episodes, their stages, markers and rewards. */
+export const EPISODES = [
   {
     id: 1,
-    title: 'EPISODE 1 — PAKET PANAS',
-    desc: 'Sponsor: Kopi Vidrio. Antar paketnya sebelum dingin.',
-    rewardCash: 850,
-    rewardFollowers: 2400,
+    title: 'EPISODE 1 — THE MARINA VAULT',
+    sponsor: 'SUNNY COLA',
+    cash: 2500,
+    followers: 8400,
     stages: [
-      'Curi mobil apa saja — dekati mobil lalu tekan E',
-      'Antar paket ke titik DROP emas di ujung timur kota',
+      { text: 'Get to the Marina Vault', x: 2680, y: 1880, radius: 110, kind: 'goto' },
+      { text: 'Grab the loot — stand on the mark', x: 2680, y: 1880, radius: 70, kind: 'grab', hold: 1.2 },
+      { text: 'Lose the heat — reach Garage Luna', x: 2455, y: 625, radius: 120, kind: 'goto' },
     ],
   },
   {
     id: 2,
-    title: 'EPISODE 2 — RAMPOK TOKO SARI',
-    desc: 'Sponsor: Bengkel Rizki. Satu toko, satu kamera, satu jalan kabur.',
-    rewardCash: 2400,
-    rewardFollowers: 8100,
+    title: 'EPISODE 2 — THE SPONSORED GETAWAY',
+    sponsor: 'VIDRIO ENERGY',
+    cash: 6000,
+    followers: 21000,
     stages: [
-      'Pergi ke TOKO SARI di pusat kota',
-      'Tahan E di depan toko untuk merampok (3 detik)',
-      'KABUR! Masuk GARASI VIDRIO — putus siaran, bintang turun',
+      { text: 'Steal the pink Comet GT', x: 1075, y: 700, radius: 80, kind: 'steal' },
+      { text: 'Deliver it to the VIDRIO TV studio', x: 560, y: 1117, radius: 110, kind: 'deliver' },
+      { text: 'Lose the heat — reach Garage Rico', x: 655, y: 625, radius: 120, kind: 'goto' },
     ],
   },
 ];
 
-/** Fresh mission state: episode 1 offered, none active yet. */
-export function createMissions(world) {
-  return {
-    episodes: EPISODES,
-    active: null,
-    stage: 0,
-    progress: 0,
-    done: [false, false],
-    offered: 0,
-    marker: { x: world.drop.x, y: world.drop.y },
-    banner: null,
-    bannerT: 0,
-  };
+/** Start an episode: reset its stage and point the marker at stage one. */
+export function startEpisode(state, id) {
+  const ep = EPISODES.find((e) => e.id === id);
+  if (!ep) return false;
+  state.mission.id = id;
+  state.mission.stage = 0;
+  state.mission.done = false;
+  state.mission.completeT = 0;
+  state.mission.lootT = 0;
+  const stage = ep.stages[0];
+  state.mission.marker = { x: stage.x, y: stage.y };
+  state.mission.markerText = stage.text;
+  setTicker(state, `${ep.title} — ${stage.text}. Sponsored by ${ep.sponsor}.`);
+  return true;
 }
 
-/** Start an episode: set the marker and the first objective. */
-export function startEpisode(state, index) {
-  const m = state.missions;
-  m.active = index;
-  m.stage = 0;
-  m.progress = 0;
-  const ep = EPISODES[index];
-  m.marker = index === 0 ? { x: state.world.drop.x, y: state.world.drop.y } : { x: state.world.tokoSari.x + state.world.tokoSari.w / 2, y: state.world.tokoSari.y + state.world.tokoSari.h / 2 };
-  m.banner = ep.title;
-  m.bannerT = 3.2;
-  pushTicker(state, `${ep.title} MULAI — ${ep.desc}`);
-  state.audio.chime();
+/** The episode currently running, or null when between episodes. */
+export function currentEpisode(state) {
+  return EPISODES.find((e) => e.id === state.mission.id) ?? null;
 }
 
-/** Current objective text for the HUD. */
+/** The objective line the HUD shows right now. */
 export function objectiveText(state) {
-  const m = state.missions;
-  if (m.active === null) {
-    if (m.done.every(Boolean)) return 'SEASON 1 SELESAI — bebas berkeliaran, tekan M untuk ulangi episode';
-    return `Episode berikutnya: ${EPISODES[m.offered].title} — tekan M untuk mulai`;
-  }
-  const ep = EPISODES[m.active];
-  return `${ep.title}: ${ep.stages[m.stage]}`;
+  const ep = currentEpisode(state);
+  if (!ep) return 'Press 1 for Episode 1 — the Marina Vault heist';
+  if (state.mission.done) return `${ep.title} — COMPLETE`;
+  return `${ep.title}: ${ep.stages[state.mission.stage].text}`;
 }
 
-/** Finish the active episode: pay out, toast, save, offer the next one. */
-export function completeEpisode(state) {
-  const m = state.missions;
-  const ep = EPISODES[m.active];
-  state.stats.cash += ep.rewardCash;
-  state.stats.followers += ep.rewardFollowers;
-  state.stats.episodesDone += 1;
-  m.done[m.active] = true;
-  m.banner = `EPISODE ${ep.id} SELESAI! +${formatMoney(ep.rewardCash)} • +${formatCount(ep.rewardFollowers)} followers`;
-  m.bannerT = 4.5;
-  pushTicker(state, `BREAKING: Episode ${ep.id} viral — +${formatCount(ep.rewardFollowers)} followers baru!`);
-  state.audio.chime();
-  state.toasts.push({ text: `Sponsor membayar ${formatMoney(ep.rewardCash)}`, t: 4 });
-  m.active = null;
-  m.offered = m.done[0] && !m.done[1] ? 1 : 0;
-  state.saveGame();
-}
-
-/** Advance the active episode's stage machine. */
-export function stepMissions(state, dt, input) {
-  const m = state.missions;
-  if (m.bannerT > 0) m.bannerT -= dt;
-  if (m.active === null) return;
-  const player = state.player;
-  if (m.active === 0) {
-    if (m.stage === 0) {
-      if (!player.onFoot) {
-        m.stage = 1;
-        m.marker = { x: state.world.drop.x, y: state.world.drop.y };
-        state.toasts.push({ text: 'Paket di tangan — antar ke titik DROP!', t: 3 });
-      }
-    } else if (m.stage === 1) {
-      if (dist(player.x, player.y, state.world.drop.x, state.world.drop.y) < 70) {
-        completeEpisode(state);
-      }
-    }
-    return;
-  }
-  // Episode 2.
-  const shop = state.world.tokoSari;
-  const shopCx = shop.x + shop.w / 2;
-  const shopCy = shop.y + shop.h / 2;
-  // Distance to the shop's rect (not its centre): standing at the front door counts.
-  const dx = Math.max(shop.x - player.x, 0, player.x - (shop.x + shop.w));
-  const dy = Math.max(shop.y - player.y, 0, player.y - (shop.y + shop.h));
-  const shopDist = Math.hypot(dx, dy);
-  if (m.stage === 0) {
-    m.marker = { x: shopCx, y: shopCy };
-    if (shopDist < 60) {
-      m.stage = 1;
-      m.progress = 0;
-    }
-  } else if (m.stage === 1) {
-    m.marker = { x: shopCx, y: shopCy };
-    if (player.onFoot && shopDist < 70 && input.holdingE()) {
-      m.progress += dt;
-      if (state.rng() < 0.3) {
-        state.particles.push({
-          x: player.x + (state.rng() - 0.5) * 30,
-          y: player.y + (state.rng() - 0.5) * 30,
-          vx: 0,
-          vy: -30,
-          life: 0.4,
-          maxLife: 0.4,
-          size: 6,
-          color: '#ffd166',
-          kind: 'spark',
-        });
-      }
-      if (m.progress >= 3) {
-        m.stage = 2;
-        m.marker = { x: state.world.garage.x + state.world.garage.w / 2, y: state.world.garage.y + state.world.garage.h / 2 };
-        addHeat(state, HEAT_ROBBERY, 'BREAKING: TOKO SARI dirampok live — polisi menuju lokasi!');
-        state.audio.siren(true);
-      }
+/**
+ * One step for the mission: check the current stage's condition, advance,
+ * and pay out when the last stage clears. Returns EVENT_MISSION_DONE once.
+ */
+export function stepMissions(state, dt) {
+  const ep = currentEpisode(state);
+  if (!ep || state.mission.done) return 0;
+  const stage = ep.stages[state.mission.stage];
+  const p = state.player;
+  const car = playerCar(state);
+  const px = car ? car.x : p.x;
+  const py = car ? car.y : p.y;
+  let reached = false;
+  if (stage.kind === 'goto' || stage.kind === 'deliver') {
+    reached = dist2(px, py, stage.x, stage.y) < stage.radius * stage.radius;
+  } else if (stage.kind === 'grab') {
+    if (dist2(px, py, stage.x, stage.y) < stage.radius * stage.radius) {
+      state.mission.lootT += dt;
+      if (state.mission.lootT >= stage.hold) reached = true;
     } else {
-      m.progress = Math.max(0, m.progress - dt * 2);
+      state.mission.lootT = 0;
     }
-  } else if (m.stage === 2) {
-    m.marker = { x: state.world.garage.x + state.world.garage.w / 2, y: state.world.garage.y + state.world.garage.h / 2 };
-    if (pointInRect(player.x, player.y, state.world.garage)) {
-      // Inside the garage the broadcast dies; finishing needs the heat to fall.
-      if (state.police.heat < 12) completeEpisode(state);
-      else state.toasts.push({ text: 'Siaran putus… tunggu bintang turun!', t: 1.2 });
-    }
+  } else if (stage.kind === 'steal') {
+    reached = !p.onFoot && car !== null && car.special === 'COMET GT';
   }
+  if (!reached) return 0;
+  // Stage cleared: heat jumps (the audience loves it) and the next marker shows.
+  state.mission.lootT = 0;
+  addHeat(state, WANTED.missionHeat);
+  burst(state, px, py, '#ffd94d', 14, 200);
+  addFloater(state, px, py - 40, 'STAGE CLEAR!', '#ffd94d');
+  state.mission.stage += 1;
+  if (state.mission.stage >= ep.stages.length) {
+    completeEpisode(state, ep);
+    return EVENT_MISSION_DONE;
+  }
+  const next = ep.stages[state.mission.stage];
+  state.mission.marker = { x: next.x, y: next.y };
+  state.mission.markerText = next.text;
+  setTicker(state, `${ep.title} — ${next.text}`);
+  return 0;
 }
 
-/** Draw the pulsing gold mission marker in the world. */
-export function drawMissionMarker(ctx, state) {
-  const m = state.missions;
-  if (m.active === null) return;
-  const pulse = 1 + Math.sin(state.time * 5) * 0.18;
-  const { x, y } = m.marker;
-  ctx.save();
-  ctx.strokeStyle = '#ffb703';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.arc(x, y, 30 * pulse, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#ffb703';
-  ctx.font = 'bold 22px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('!', x, y + 8);
-  if (m.active === 1 && m.stage === 1 && m.progress > 0) {
-    // Robbery progress ring.
-    ctx.strokeStyle = '#e63946';
-    ctx.lineWidth = 6;
-    ctx.beginPath();
-    ctx.arc(x, y, 44, -Math.PI / 2, -Math.PI / 2 + (m.progress / 3) * Math.PI * 2);
-    ctx.stroke();
-  }
-  ctx.restore();
+function completeEpisode(state, ep) {
+  state.mission.done = true;
+  state.mission.completeT = 0;
+  state.progress.cash += ep.cash;
+  state.progress.followers += ep.followers;
+  state.progress.episode = Math.max(state.progress.episode, ep.id);
+  state.progress.sponsor = ep.sponsor;
+  state.stats.episodesDone += 1;
+  coolDown(state, 2);
+  const p = state.player;
+  const car = playerCar(state);
+  const px = car ? car.x : p.x;
+  const py = car ? car.y : p.y;
+  burst(state, px, py, '#ff5fa2', 26, 260);
+  burst(state, px, py, '#19c2d8', 26, 220);
+  setTicker(state, `${ep.title} COMPLETE — +$${ep.cash.toLocaleString('en-US')} and +${ep.followers.toLocaleString('en-US')} followers, sponsored by ${ep.sponsor}`);
 }

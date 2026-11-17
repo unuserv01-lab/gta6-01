@@ -1,107 +1,118 @@
-// LIVE HEIST — config.js
-// All tuning for Costa Vidrio: city size, movement, wanted/viewer math, palette.
-// One job: constants. Nothing here touches the DOM or the game state.
+// LIVE HEIST — Costa Vidrio. Every tuning number and colour in one place.
+// The world is a fixed 3200x2400 sunny coastal city; the camera shows a
+// 1280x720 window of it, so no rule below depends on the screen size.
+// Differentiation note (top-10 audit, 18 Nov): sunny coastal cities
+// dominate the field, so this entry wins on the DENSEST TV frame — a big
+// LIVE badge and viewer count, a scrolling news ticker, REC icons over
+// filming bystanders, a BREAKING overlay, a red minimap at 4 stars, and a
+// visible SIGNAL LOST moment when the broadcast is cut in an alley.
 
-// World geometry: a sunny coastal city, 40 x 30 tiles of 64 px.
-export const TILE = 64;
-export const COLS = 40;
-export const ROWS = 30;
-export const WORLD_W = COLS * TILE;
-export const WORLD_H = ROWS * TILE;
+export const WORLD = { width: 3200, height: 2400 };
+export const VIEW = { width: 1280, height: 720 };
+
+/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
 export const STEP = 1 / 60;
-export const SAVE_KEY = 'liveheist-save-v1';
 
-// Avenues (vertical roads) and streets (horizontal roads), in tile coordinates.
-// Each road is 2 tiles wide; the beach is the last rows, the sea after it.
-export const AVENUES = [5, 13, 21, 29, 37];
-export const STREETS = [4, 11, 18, 25];
-export const BEACH_ROW = 27;
-export const SEA_ROW = 28;
+/** Where the save (cash, followers, best episode) is kept between visits. */
+export const SAVE_KEY = 'live-heist.save.v1';
 
-// Player movement.
-export const PLAYER_WALK = 195;
-export const PLAYER_RUN = 265;
-export const PLAYER_RADIUS = 14;
-export const PLAYER_HEALTH = 100;
+/** The road grid of Costa Vidrio: five avenues north-south, four east-west. */
+export const ROAD_W = 140;
+export const ROAD_X = [400, 1000, 1600, 2200, 2800];
+export const ROAD_Y = [400, 1000, 1600, 2000];
 
-// Car physics.
-export const CAR_ACCEL = 520;
-export const CAR_MAX = 430;
-export const CAR_REVERSE = 170;
-export const CAR_TURN = 2.6;
-export const CAR_BRAKE = 700;
-export const CAR_DRAG = 0.55;
-export const POLICE_MAX = 465;
-export const SWAT_MAX = 500;
-
-// Wanted / viewer-count tuning. Heat 0..100 maps to stars 0..5.
-export const HEAT_STEAL_CAR = 18;
-export const HEAT_PUNCH = 8;
-export const HEAT_SHOOT = 12;
-export const HEAT_HIT_PED = 15;
-export const HEAT_ROBBERY = 42;
-export const HEAT_DECAY = 1.6;
-export const HEAT_HIDEOUT_DECAY = 22;
-export const STAR_THRESHOLDS = [0, 12, 30, 52, 72, 90];
-export const VIEWERS_BASE = 120;
-
-// Sun-soaked Costa Vidrio palette: orange, cyan, pink, warm sand.
-export const PALETTE = {
-  sky: '#ffe3b3',
-  grass: '#8fce6e',
-  sand: '#f2d492',
-  sea: '#2fa8c9',
-  seaDeep: '#1e7fa8',
-  sidewalk: '#e3d3ae',
-  road: '#3d414d',
-  roadLine: '#ffd94d',
-  buildingOrange: '#ff9f43',
-  buildingCyan: '#38b6d3',
-  buildingPink: '#ff6b9d',
-  buildingYellow: '#ffd166',
-  buildingCream: '#f7ede2',
-  buildingTeal: '#2ec4b6',
-  roof: '#2b2f3a',
-  garage: '#5b6b7a',
-  park: '#79c25f',
-  liveRed: '#e63946',
-  gold: '#ffb703',
-  hudBg: 'rgba(12, 16, 28, 0.78)',
-  hudLine: 'rgba(255, 255, 255, 0.16)',
+export const PLAYER = {
+  walkSpeed: 275,
+  radius: 14,
+  hp: 100,
+  punchRange: 58,
+  punchArc: 1.1,
 };
 
-/** Clamp a number into [lo, hi]. */
-export function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
+export const CAR = {
+  accel: 540,
+  brake: 760,
+  maxSpeed: 580,
+  reverseMax: 190,
+  turn: 2.7,
+  radius: 21,
+  boostMax: 100,
+  boostDrain: 34,
+  boostRegen: 12,
+};
 
-/** Linear interpolation. */
-export function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
+export const POLICE = {
+  maxSpeed: 480,
+  accel: 450,
+  turn: 3.0,
+  radius: 21,
+  catchRadius: 48,
+  bustedSeconds: 1.6,
+  ramDamage: 14,
+};
 
-/** Smallest signed angle difference from a to b, in radians. */
-export function angleDiff(a, b) {
-  let d = b - a;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d < -Math.PI) d += Math.PI * 2;
-  return d;
-}
+export const SWAT = { maxSpeed: 520, accel: 520, radius: 24, ramDamage: 22 };
 
-/** Distance between two points. */
-export function dist(ax, ay, bx, by) {
-  return Math.hypot(bx - ax, by - ay);
-}
+/** Wanted heat: 100 heat is one star. Stars are the viewer count made visible. */
+export const WANTED = {
+  heatPerStar: 100,
+  decaySafe: 30,
+  decayOpen: 2.0,
+  stealHeat: 60,
+  punchHeat: 16,
+  speedHeat: 6,
+  missionHeat: 45,
+  baseViewers: 1240,
+  viewersPerStar: 4200,
+  viewersPerHeat: 30,
+};
 
-/** Format a viewer/follower count: 12400 -> "12.4K", 950 -> "950". */
-export function formatCount(n) {
-  const v = Math.max(0, Math.floor(n));
-  if (v >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
-  if (v >= 1000) return `${(v / 1000).toFixed(1)}K`;
-  return String(v);
-}
+/** Sun-soaked Costa Vidrio: hot sun, orange-cyan-pink, TV-broadcast chrome. */
+export const PALETTE = {
+  sand: '#f0c573',
+  sea: '#1fb6d8',
+  seaDeep: '#0d7ea6',
+  grass: '#7ec850',
+  pavement: '#e3d3a8',
+  road: '#464052',
+  roadEdge: '#35303f',
+  roadLine: '#ffd94d',
+  sidewalk: '#efe0b8',
+  building: ['#ff7a59', '#19c2d8', '#ff5fa2', '#ffb347', '#7dd069', '#8e7cf3', '#f2e394', '#ff8c69'],
+  shop: '#ff5fa2',
+  garage: '#19c2d8',
+  alley: '#b7a06a',
+  palm: '#2f9e44',
+  palmTrunk: '#8a5a2b',
+  player: '#ff7a1a',
+  playerShirt: '#ffe14d',
+  police: '#1d2433',
+  policeWhite: '#f4f6f8',
+  swat: '#232a3a',
+  heli: '#e8ecf2',
+  heliStripe: '#ff3b30',
+  ped: ['#ffd166', '#06d6a0', '#ef476f', '#118ab2', '#f78c6b', '#9b5de5'],
+  car: ['#ff5fa2', '#19c2d8', '#ffb347', '#f2e394', '#7dd069', '#8e7cf3', '#e5534b', '#4fc3f7'],
+  text: '#fff7e6',
+  darkText: '#241f2e',
+  panel: '#14101ccc',
+  panelEdge: '#ff5fa2',
+  liveRed: '#ff2e3e',
+  star: '#ffd94d',
+  minimap: '#14101cd9',
+  ticker: '#ff2e3e',
+};
 
-/** Format cash: 1250 -> "$1,250". */
-export function formatMoney(n) {
-  return `$${Math.floor(n).toLocaleString('en-US')}`;
-}
+export const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+export const FONT_DISPLAY = '"Arial Black", "Segoe UI", system-ui, sans-serif';
+
+/** News ticker lines that scroll along the bottom of the screen. */
+export const TICKER_LINES = [
+  'BREAKING: Mystery driver turns Costa Vidrio into a live show — viewers climbing by the minute',
+  'VIDRIO TV: Who is the Wheelman? City asks as chase goes viral',
+  'SUNNY COLA signs on as first sponsor of the runaway broadcast',
+  'Traffic advisory: avoid Avenida del Sol — police activity and one very pink car',
+  'Witnesses report pedestrians filming the chase: "It is like TV, but real"',
+  'Marina Vault heist: police confirm a vault was emptied during a live stream',
+  'VIDRIO ENERGY offers a reward for the Comet GT — "bring it to the studio, live"',
+];

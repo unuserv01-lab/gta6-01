@@ -1,113 +1,75 @@
-// LIVE HEIST — input.js
-// Keyboard + mouse, nothing else. Edge-triggered actions are consumed by takeActions()
-// so a single key press never fires twice across frames.
+// Keyboard and pointer input for LIVE HEIST. Held keys give a steering
+// direction; one-shot presses (interact, punch/boost, pause, confirm) are
+// queued as bit flags and taken once by the loop, so a press between two
+// frames is never lost and never counted twice.
 
-export const ACTION_CONFIRM = 1 << 0;
-export const ACTION_PAUSE = 1 << 1;
-export const ACTION_ENTER_CAR = 1 << 2;
-export const ACTION_PUNCH = 1 << 3;
-export const ACTION_SHOOT = 1 << 4;
-export const ACTION_ROB = 1 << 5;
-export const ACTION_MISSION = 1 << 6;
+export const ACTION_CONFIRM = 1;
+export const ACTION_PAUSE = 2;
+export const ACTION_INTERACT = 4;
+export const ACTION_PUNCH = 8;
+export const ACTION_MUTE = 16;
 
-const KEY_ACTIONS = {
-  Enter: ACTION_CONFIRM,
-  Space: ACTION_CONFIRM | ACTION_PUNCH,
-  Escape: ACTION_PAUSE,
-  KeyP: ACTION_PAUSE,
-  KeyE: ACTION_ENTER_CAR | ACTION_ROB,
-  KeyM: ACTION_MISSION,
-};
+const UP = new Set(['ArrowUp', 'KeyW']);
+const DOWN = new Set(['ArrowDown', 'KeyS']);
+const LEFT = new Set(['ArrowLeft', 'KeyA']);
+const RIGHT = new Set(['ArrowRight', 'KeyD']);
+const CONFIRM = new Set(['Enter']);
+const INTERACT = new Set(['KeyE']);
+const PUNCH = new Set(['Space']);
+const PAUSE = new Set(['KeyP', 'Escape']);
+const MUTE = new Set(['KeyM']);
 
-/** Create the input state for a canvas. Call takeActions() once per frame. */
-export function createInput(canvas) {
-  const keys = new Set();
-  const pressed = new Set();
-  const mouse = { x: 0, y: 0, down: false, clicked: false };
-  let hadFocus = false;
+export function createInput(target) {
+  const held = new Set();
+  let actions = 0;
 
-  function onKeyDown(e) {
-    if (e.repeat) return;
-    keys.add(e.code);
-    pressed.add(e.code);
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
-  }
-
-  function onKeyUp(e) {
-    keys.delete(e.code);
-  }
-
-  function onMouseMove(e) {
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = e.clientX - rect.left;
-    mouse.y = e.clientY - rect.top;
-  }
-
-  function onMouseDown(e) {
-    onMouseMove(e);
-    mouse.down = true;
-    mouse.clicked = true;
-  }
-
-  function onMouseUp() {
-    mouse.down = false;
-  }
-
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  canvas.addEventListener('mousemove', onMouseMove);
-  canvas.addEventListener('mousedown', onMouseDown);
-  window.addEventListener('mouseup', onMouseUp);
-  canvas.addEventListener('click', () => {
-    hadFocus = true;
+  window.addEventListener('keydown', (event) => {
+    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)) {
+      held.add(event.code);
+    } else if (CONFIRM.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_CONFIRM;
+    } else if (INTERACT.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_INTERACT;
+    } else if (PUNCH.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_PUNCH;
+    } else if (PAUSE.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_PAUSE;
+    } else if (MUTE.has(event.code)) {
+      if (!event.repeat) actions |= ACTION_MUTE;
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+  window.addEventListener('keyup', (event) => {
+    held.delete(event.code);
+  });
+  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
+  window.addEventListener('blur', () => {
+    held.clear();
+  });
+  target.addEventListener('pointerdown', () => {
+    actions |= ACTION_CONFIRM;
   });
 
+  function has(set) {
+    for (const code of set) if (held.has(code)) return true;
+    return false;
+  }
+
   return {
-    keys,
-    mouse,
-
-    /** WASD / arrow movement axis, normalised, in screen space (y down). */
-    axis() {
-      let x = 0;
-      let y = 0;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) y -= 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
-      if (x !== 0 && y !== 0) {
-        x *= Math.SQRT1_2;
-        y *= Math.SQRT1_2;
-      }
-      return { x, y };
+    /** -1/0/1 on each axis, from the held movement keys. */
+    moveX() {
+      return (has(RIGHT) ? 1 : 0) - (has(LEFT) ? 1 : 0);
     },
-
-    /** True while the run key (Shift) is held. */
-    running() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight');
+    moveY() {
+      return (has(DOWN) ? 1 : 0) - (has(UP) ? 1 : 0);
     },
-
-    /** True while E is held (robbery hold, car entry). */
-    holdingE() {
-      return keys.has('KeyE');
-    },
-
-    /** Edge-triggered actions pressed since the last takeActions() call. */
+    /** The one-shot presses since the last call, as ACTION_* flags. */
     takeActions() {
-      let actions = 0;
-      for (const code of pressed) {
-        actions |= KEY_ACTIONS[code] ?? 0;
-      }
-      pressed.clear();
-      if (mouse.clicked) {
-        actions |= ACTION_CONFIRM | ACTION_SHOOT;
-        mouse.clicked = false;
-      }
-      return actions;
-    },
-
-    /** True when the player has clicked or pressed a key at least once (audio unlock). */
-    interacted() {
-      return hadFocus || keys.size > 0 || mouse.down;
+      const taken = actions;
+      actions = 0;
+      return taken;
     },
   };
 }
