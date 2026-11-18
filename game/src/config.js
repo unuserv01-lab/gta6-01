@@ -1,118 +1,135 @@
-// LIVE HEIST — Costa Vidrio. Every tuning number and colour in one place.
-// The world is a fixed 3200x2400 sunny coastal city; the camera shows a
-// 1280x720 window of it, so no rule below depends on the screen size.
-// Differentiation note (top-10 audit, 18 Nov): sunny coastal cities
-// dominate the field, so this entry wins on the DENSEST TV frame — a big
-// LIVE badge and viewer count, a scrolling news ticker, REC icons over
-// filming bystanders, a BREAKING overlay, a red minimap at 4 stars, and a
-// visible SIGNAL LOST moment when the broadcast is cut in an alley.
+// SPDX-License-Identifier: MIT
+// Live Heist — tuning table for Costa Vidrio.
+// Every number that shapes the chase, the crowd and the broadcast lives here,
+// so the rest of the game reads like a script, not a spreadsheet.
 
-export const WORLD = { width: 3200, height: 2400 };
-export const VIEW = { width: 1280, height: 720 };
-
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
-
-/** Where the save (cash, followers, best episode) is kept between visits. */
-export const SAVE_KEY = 'live-heist.save.v1';
-
-/** The road grid of Costa Vidrio: five avenues north-south, four east-west. */
-export const ROAD_W = 140;
-export const ROAD_X = [400, 1000, 1600, 2200, 2800];
-export const ROAD_Y = [400, 1000, 1600, 2000];
-
-export const PLAYER = {
-  walkSpeed: 275,
-  radius: 14,
-  hp: 100,
-  punchRange: 58,
-  punchArc: 1.1,
+export const CFG = {
+  // World
+  worldW: 3600,
+  worldH: 2600,
+  roadW: 96,
+  // Player on foot
+  walkSpeed: 235,
+  runSpeed: 330,
+  playerRadius: 13,
+  playerMaxHealth: 100,
+  playerMaxArmor: 100,
+  // Cars
+  carAccel: 520,
+  carBrake: 900,
+  carReverse: 260,
+  carMaxSpeed: 560,
+  carMaxReverse: 200,
+  carTurn: 2.6,
+  carLength: 52,
+  carWidth: 26,
+  stealRange: 64,
+  // Traffic
+  trafficCount: 30,
+  pedCount: 48,
+  trafficSpeedMin: 90,
+  trafficSpeedMax: 170,
+  // Wanted / broadcast
+  heatPerSteal: 26,
+  heatPerHitPed: 14,
+  heatPerShot: 9,
+  heatPerCopDown: 34,
+  heatPerSpeeding: 0.6,
+  heatDecay: 2.2,
+  heatDecayDeadZone: 26,
+  starThresholds: [0, 18, 42, 72, 108, 150],
+  viewersBase: 380,
+  viewersPerHeat: 118,
+  viewersJitter: 240,
+  // Police
+  policeMaxSpeed: 520,
+  policeAccel: 640,
+  policeRamDamage: 7,
+  policeSpawnGap: 3.2,
+  roadblockAtStars: 4,
+  swatAtStars: 5,
+  heliAtStars: 3,
+  // Combat
+  pistolDamage: 34,
+  pistolAmmo: 12,
+  pistolRange: 420,
+  punchDamage: 18,
+  punchRange: 42,
+  // Missions
+  missionRewardCash: [2400, 3600, 5200, 9000],
+  missionRewardFollowers: [1800, 3400, 6100, 12500],
+  // Camera / view
+  viewW: 1280,
+  viewH: 720,
+  camLerp: 6.5,
+  // Money / progress
+  startCash: 850,
+  startFollowers: 1240,
 };
 
-export const CAR = {
-  accel: 540,
-  brake: 760,
-  maxSpeed: 580,
-  reverseMax: 190,
-  turn: 2.7,
-  radius: 21,
-  boostMax: 100,
-  boostDrain: 34,
-  boostRegen: 12,
-};
-
-export const POLICE = {
-  maxSpeed: 480,
-  accel: 450,
-  turn: 3.0,
-  radius: 21,
-  catchRadius: 48,
-  bustedSeconds: 1.6,
-  ramDamage: 14,
-};
-
-export const SWAT = { maxSpeed: 520, accel: 520, radius: 24, ramDamage: 22 };
-
-/** Wanted heat: 100 heat is one star. Stars are the viewer count made visible. */
-export const WANTED = {
-  heatPerStar: 100,
-  decaySafe: 30,
-  decayOpen: 2.0,
-  stealHeat: 60,
-  punchHeat: 16,
-  speedHeat: 6,
-  missionHeat: 45,
-  baseViewers: 1240,
-  viewersPerStar: 4200,
-  viewersPerHeat: 30,
-};
-
-/** Sun-soaked Costa Vidrio: hot sun, orange-cyan-pink, TV-broadcast chrome. */
 export const PALETTE = {
-  sand: '#f0c573',
-  sea: '#1fb6d8',
-  seaDeep: '#0d7ea6',
-  grass: '#7ec850',
-  pavement: '#e3d3a8',
-  road: '#464052',
-  roadEdge: '#35303f',
-  roadLine: '#ffd94d',
-  sidewalk: '#efe0b8',
-  building: ['#ff7a59', '#19c2d8', '#ff5fa2', '#ffb347', '#7dd069', '#8e7cf3', '#f2e394', '#ff8c69'],
-  shop: '#ff5fa2',
-  garage: '#19c2d8',
-  alley: '#b7a06a',
-  palm: '#2f9e44',
-  palmTrunk: '#8a5a2b',
-  player: '#ff7a1a',
-  playerShirt: '#ffe14d',
-  police: '#1d2433',
-  policeWhite: '#f4f6f8',
-  swat: '#232a3a',
-  heli: '#e8ecf2',
-  heliStripe: '#ff3b30',
-  ped: ['#ffd166', '#06d6a0', '#ef476f', '#118ab2', '#f78c6b', '#9b5de5'],
-  car: ['#ff5fa2', '#19c2d8', '#ffb347', '#f2e394', '#7dd069', '#8e7cf3', '#e5534b', '#4fc3f7'],
-  text: '#fff7e6',
-  darkText: '#241f2e',
-  panel: '#14101ccc',
-  panelEdge: '#ff5fa2',
-  liveRed: '#ff2e3e',
-  star: '#ffd94d',
-  minimap: '#14101cd9',
-  ticker: '#ff2e3e',
+  sand: '#e8c98a',
+  sandDark: '#d9b878',
+  sea: '#1fa8c9',
+  seaDeep: '#0e7ba0',
+  grass: '#7fb069',
+  asphalt: '#3a3f4a',
+  asphaltLight: '#4a4f5c',
+  sidewalk: '#b9b3a4',
+  lineYellow: '#ffd23f',
+  lineWhite: '#f2f2f2',
+  orange: '#ff7a1a',
+  pink: '#ff4d8d',
+  cyan: '#19d3e6',
+  cream: '#fff3d6',
+  ink: '#14161f',
+  roofA: '#e2603f',
+  roofB: '#3f8f6b',
+  roofC: '#e8a13c',
+  roofD: '#7a5fb0',
+  roofE: '#c94f6d',
+  roofF: '#4f7ec9',
 };
 
-export const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-export const FONT_DISPLAY = '"Arial Black", "Segoe UI", system-ui, sans-serif';
+export const RADIO_STATIONS = [
+  { name: 'RADIO VIDRIO 101.3', track: '"Sunset Static" — Las Olas' },
+  { name: 'OLA FM 88.7', track: '"Neon Palms" — DJ Brisa' },
+  { name: 'COSTA TALK 640 AM', track: 'Heist Talk with Mara Voss' },
+  { name: 'PLAYA BEATS 96.1', track: '"Boardwalk Run" — The Tides' },
+];
 
-/** News ticker lines that scroll along the bottom of the screen. */
 export const TICKER_LINES = [
-  'BREAKING: Mystery driver turns Costa Vidrio into a live show — viewers climbing by the minute',
-  'VIDRIO TV: Who is the Wheelman? City asks as chase goes viral',
-  'SUNNY COLA signs on as first sponsor of the runaway broadcast',
-  'Traffic advisory: avoid Avenida del Sol — police activity and one very pink car',
-  'Witnesses report pedestrians filming the chase: "It is like TV, but real"',
-  'Marina Vault heist: police confirm a vault was emptied during a live stream',
-  'VIDRIO ENERGY offers a reward for the Comet GT — "bring it to the studio, live"',
+  'BREAKING: Masked driver livestreaming a chase down Avenida Sol — viewers climbing fast',
+  'VIDRIO PD: "Do not approach the orange coupe — it is being broadcast live"',
+  'Sponsor deal of the day: SUNNY SODA backs the boldest driver in Costa Vidrio',
+  'Traffic alert: roadblocks reported near the Marina — expect delays',
+  'City Hall denies the "LIVE HEIST" channel exists. The channel disagrees.',
+  'Weather: 31C, clear skies, perfect for a getaway',
+];
+
+export const MISSION_DEFS = [
+  {
+    id: 1,
+    title: 'EPISODE 1 — THE MARINA GRAB',
+    intro: 'Rico: "First episode, kid. Steal the orange Comet parked at the Marina and bring it to my garage. Make it look good — the chat is watching."',
+    sponsor: 'SUNNY SODA',
+  },
+  {
+    id: 2,
+    title: 'EPISODE 2 — CORNER STORE SMASH',
+    intro: 'Mara: "Bodega Sol keeps its till in the back. Walk in, take it, and vanish into a dead zone before the PD catches the signal."',
+    sponsor: 'TACO LOCO',
+  },
+  {
+    id: 3,
+    title: 'EPISODE 3 — THE SPONSOR RUN',
+    intro: 'Rico: "A sponsor package is waiting on the pier. Grab it, deliver it to the rooftop drop, and do it loud — three stars minimum or the deal dies."',
+    sponsor: 'VOLT ENERGY',
+  },
+  {
+    id: 4,
+    title: 'EPISODE 4 — THE BROADCAST HEIST',
+    intro: 'Mara: "The finale. Crack the Bank Vidrio vault, hold the line at five stars, and cut the feed in a dead zone. One million viewers or it never happened."',
+    sponsor: 'VIDRIO BANK',
+  },
 ];

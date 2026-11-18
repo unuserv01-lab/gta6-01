@@ -1,146 +1,153 @@
-// The player's body and cars: walking the sidewalks, stealing a parked or
-// civilian car, and driving it. Stealing is the crime that starts the show:
-// it adds wanted heat and a ticker line, and the whole city starts watching.
+// SPDX-License-Identifier: MIT
+// Live Heist — vehicles: stealing, driving, crashing.
+// The player walks up to any parked or crawling civilian car, taps E,
+// yanks the driver out and takes the wheel. Driving is arcade-simple:
+// W/S for gas and brake, A/D to steer, and the car only turns well
+// while it is moving — like a real getaway, just friendlier.
 
-import { CAR, PLAYER, WANTED } from './config.js';
-import { angleDiff, burst, clamp, nearestCar, playerCar, resolveCircle, setTicker } from './world.js';
+import { CFG } from './config.js';
+import { pointInBuilding, clampToWorld } from './world.js';
+import { isDown } from './input.js';
 
-/** Try to enter the nearest car (E). Stealing a civilian car adds heat. */
-export function tryEnterCar(state) {
-  const p = state.player;
-  if (!p.onFoot) return false;
-  const car = nearestCar(state, p.x, p.y, 78);
-  if (!car) return false;
-  p.onFoot = false;
-  p.carId = car.id;
-  car.player = true;
-  car.parked = false;
-  car.civilian = false;
-  if (!car.stolen) {
-    car.stolen = true;
-    state.stats.steals += 1;
-    addHeat(state, WANTED.stealHeat);
-    setTicker(state, `BREAKING: ${car.special ? 'Pink Comet GT' : 'A car'} stolen live on Avenida del Sol — viewers are pouring in`);
-    burst(state, car.x, car.y, '#ffd94d', 10, 160);
+const PLAYER_CARS = [
+  { model: 'Comet GT', color: '#ff7a1a', top: 600 },
+  { model: 'Brisa Coupe', color: '#19d3e6', top: 540 },
+  { model: 'Sol Runner', color: '#ff4d8d', top: 500 },
+];
+
+export function makePlayerCar(x, y, angle, modelIdx = 0) {
+  const spec = PLAYER_CARS[modelIdx % PLAYER_CARS.length];
+  return {
+    id: 'playerCar',
+    x, y, angle,
+    speed: 0,
+    color: spec.color,
+    model: spec.model,
+    top: spec.top,
+    isPlayer: true,
+    damage: 0,
+    smoke: 0,
+  };
+}
+
+export function nearestStealable(G) {
+  const { player } = G;
+  let best = null;
+  let bestD = CFG.stealRange;
+  const pool = [...G.traffic, ...G.parkedCars];
+  for (const car of pool) {
+    if (car.isPlayer) continue;
+    const d = Math.hypot(car.x - player.x, car.y - player.y);
+    if (d < bestD) { bestD = d; best = car; }
   }
-  p.angle = car.angle;
-  return true;
+  return best;
 }
 
-/** Step out of the car (E) onto the roadside. */
-export function exitCar(state) {
-  const p = state.player;
-  const car = playerCar(state);
-  if (p.onFoot || !car) return false;
-  p.onFoot = true;
-  p.carId = null;
-  car.player = false;
-  car.speed = 0;
-  const side = car.angle + Math.PI / 2;
-  const pos = resolveCircle(state, car.x + Math.cos(side) * 46, car.y + Math.sin(side) * 46, PLAYER.radius);
-  p.x = pos.x;
-  p.y = pos.y;
-  p.angle = car.angle;
-  p.speed = 0;
-  return true;
+export function stealCar(G, car) {
+  const { player, wanted } = G;
+  // Yank the driver out: the civilian car becomes the player's ride.
+  const idx = G.traffic.indexOf(car);
+  if (idx >= 0) G.traffic.splice(idx, 1);
+  const pIdx = G.parkedCars.indexOf(car);
+  if (pIdx >= 0) G.parkedCars.splice(pIdx, 1);
+  const ride = {
+    id: 'playerCar',
+    x: car.x, y: car.y, angle: car.angle,
+    speed: 0,
+    color: car.color,
+    model: car.model,
+    top: 520,
+    isPlayer: true,
+    isMission: car.isMission === true,
+    damage: 0,
+    smoke: 0,
+  };
+  G.playerCar = ride;
+  player.inCar = true;
+  player.x = ride.x;
+  player.y = ride.y;
+  player.angle = ride.angle;
+  G.wanted.heat += CFG.heatPerSteal;
+  G.stats.carsStolen += 1;
+  G.feed.push(`CAR STOLEN — a ${car.model} joins the broadcast`);
+  G.audio.blip(880, 0.08);
+  G.audio.blip(660, 0.12);
+  return ride;
 }
 
-/** Add wanted heat; stars and the viewer count follow from it. */
-export function addHeat(state, amount) {
-  state.wanted.heat = Math.min(520, state.wanted.heat + amount);
+export function exitCar(G) {
+  const { player } = G;
+  if (!G.playerCar) return;
+  player.inCar = false;
+  player.x = G.playerCar.x + Math.cos(G.playerCar.angle + Math.PI / 2) * 34;
+  player.y = G.playerCar.y + Math.sin(G.playerCar.angle + Math.PI / 2) * 34;
+  player.angle = G.playerCar.angle;
+  G.playerCar.speed = 0;
+  G.playerCar = null;
 }
 
-/** One step for the player, on foot or behind the wheel. */
-export function stepPlayer(state, dt, input, actions) {
-  const p = state.player;
-  const mx = input.moveX();
-  const my = input.moveY();
-  p.moving = mx !== 0 || my !== 0;
-  if (p.onFoot) {
-    const len = Math.hypot(mx, my) || 1;
-    const vx = (mx / len) * PLAYER.walkSpeed;
-    const vy = (my / len) * PLAYER.walkSpeed;
-    if (p.moving) p.angle = Math.atan2(vy, vx);
-    const pos = resolveCircle(state, p.x + vx * dt, p.y + vy * dt, PLAYER.radius);
-    p.x = pos.x;
-    p.y = pos.y;
-    p.speed = p.moving ? PLAYER.walkSpeed : 0;
-    if (p.punchT > 0) p.punchT -= dt;
+export function updatePlayerCar(G, dt) {
+  const car = G.playerCar;
+  if (!car) return;
+  const { input, player } = G;
+  const fwd = isDown(input, 'w', 'ArrowUp') ? 1 : 0;
+  const back = isDown(input, 's', 'ArrowDown') ? 1 : 0;
+  const steerL = isDown(input, 'a', 'ArrowLeft') ? 1 : 0;
+  const steerR = isDown(input, 'd', 'ArrowRight') ? 1 : 0;
+
+  if (fwd) car.speed += CFG.carAccel * dt;
+  else if (back) {
+    car.speed -= (car.speed > 20 ? CFG.carBrake : CFG.carAccel * 0.55) * dt;
   } else {
-    stepPlayerCar(state, dt, mx, my, actions);
+    car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 240 * dt);
   }
-}
+  car.speed = Math.max(-CFG.carMaxReverse, Math.min(car.top, car.speed));
+  // A wrecked car (damage past 100) loses half its top speed and
+  // pours smoke — time to ditch it and steal a fresh one.
+  if (car.damage > 100) car.speed = Math.max(-CFG.carMaxReverse, Math.min(car.top * 0.5, car.speed));
 
-function stepPlayerCar(state, dt, mx, my, actions) {
-  const p = state.player;
-  const car = playerCar(state);
-  if (!car) {
-    p.onFoot = true;
-    return;
-  }
-  // Space is a one-shot nitro pulse behind the wheel (a punch on foot).
-  const boostPulse = (actions & 8) !== 0 && p.boost > 20;
-  const throttle = my < 0 ? 1 : my > 0 ? -0.55 : 0;
-  const maxSpeed = CAR.maxSpeed;
-  if (throttle > 0) car.speed += CAR.accel * dt;
-  else if (throttle < 0) car.speed -= (car.speed > 0 ? CAR.brake : CAR.accel * 0.6) * dt;
-  else car.speed -= Math.sign(car.speed) * 260 * dt;
-  if (boostPulse) {
-    car.speed = Math.min(maxSpeed * 1.4, car.speed + 230);
-    p.boost = Math.max(0, p.boost - 30);
-    burst(state, car.x, car.y, '#19c2d8', 8, 200);
-  } else {
-    p.boost = Math.min(CAR.boostMax, p.boost + CAR.boostRegen * dt);
-  }
-  car.speed = clamp(car.speed, -CAR.reverseMax, maxSpeed);
-  if (Math.abs(car.speed) < 4 && throttle === 0) car.speed = 0;
-  const steer = mx * CAR.turn * clamp(Math.abs(car.speed) / 220, 0, 1) * (car.speed >= 0 ? 1 : -1);
-  car.angle += steer * dt;
+  const steer = (steerR - steerL) * CFG.carTurn * Math.min(1, Math.abs(car.speed) / 160);
+  car.angle += steer * Math.sign(car.speed || 1) * dt * (car.speed >= 0 ? 1 : -1);
+
   const nx = car.x + Math.cos(car.angle) * car.speed * dt;
   const ny = car.y + Math.sin(car.angle) * car.speed * dt;
-  const pos = resolveCircle(state, nx, ny, CAR.radius);
-  if (pos.x !== nx || pos.y !== ny) {
-    // Bumped a building: lose speed and throw sparks.
-    if (Math.abs(car.speed) > 120) burst(state, nx, ny, '#ffd94d', 6, 140);
-    car.speed *= 0.45;
+  const hit = pointInBuilding(G.world, nx, ny, 4);
+  if (hit) {
+    car.speed *= -0.25;
+    car.damage += Math.abs(car.speed) * 0.02 + 4;
+    G.audio.thud();
+    G.particles.burst(car.x, car.y, '#ffd23f', 8);
+  } else {
+    const c = clampToWorld(nx, ny);
+    if (c.x !== nx || c.y !== ny) car.speed *= 0.4;
+    car.x = c.x;
+    car.y = c.y;
   }
-  car.x = pos.x;
-  car.y = pos.y;
-  p.x = car.x;
-  p.y = car.y;
-  p.angle = car.angle;
-  p.speed = Math.abs(car.speed);
-  // Speeding past the law while already hot adds heat.
-  if (Math.abs(car.speed) > 430 && state.wanted.stars >= 1) {
-    state.wanted.heat = Math.min(520, state.wanted.heat + WANTED.speedHeat * dt);
+  car.smoke = Math.max(0, car.damage - 55) / 45;
+  player.x = car.x;
+  player.y = car.y;
+  player.angle = car.angle;
+  player.speed = Math.abs(car.speed);
+
+  // Speeding past a cop car feeds the broadcast.
+  if (Math.abs(car.speed) > 420 && G.wanted.stars >= 1) {
+    G.wanted.heat += CFG.heatPerSpeeding * dt;
+  }
+  // Skid marks and dust while cornering hard.
+  if (Math.abs(car.speed) > 300 && (steerL || steerR) && Math.random() < dt * 22) {
+    G.particles.puff(car.x - Math.cos(car.angle) * 22, car.y - Math.sin(car.angle) * 22);
   }
 }
 
-/** Keep two cars from overlapping: a soft push apart, for traffic bumps. */
-export function separateCars(state) {
-  const cars = state.cars;
-  for (let i = 0; i < cars.length; i += 1) {
-    for (let j = i + 1; j < cars.length; j += 1) {
-      const a = cars[i];
-      const b = cars[j];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d2 = dx * dx + dy * dy;
-      const min = 44;
-      if (d2 < min * min && d2 > 0.01) {
-        const d = Math.sqrt(d2);
-        const push = (min - d) / 2;
-        const ux = dx / d;
-        const uy = dy / d;
-        if (!a.parked) {
-          a.x -= ux * push;
-          a.y -= uy * push;
-        }
-        if (!b.parked) {
-          b.x += ux * push;
-          b.y += uy * push;
-        }
-      }
+export function collideCarsWithWorld(G, dt) {
+  // Police and traffic bounce off buildings; the player car handles
+  // its own collision in updatePlayerCar.
+  for (const car of [...G.police, ...G.traffic]) {
+    if (pointInBuilding(G.world, car.x, car.y, 2)) {
+      car.x -= Math.cos(car.angle) * car.speed * dt * 2;
+      car.y -= Math.sin(car.angle) * car.speed * dt * 2;
+      car.speed *= 0.5;
+      car.angle += (Math.random() - 0.5) * 0.9;
     }
   }
 }

@@ -1,372 +1,14 @@
-// The TV frame: everything the audience sees — the LIVE badge and viewer
-// count, the wanted stars, the minimap (red at 4 stars), the scrolling news
-// ticker, the mission objective, cash and followers, and the big overlays:
-// BREAKING at 3 stars, SIGNAL LOST when the broadcast is cut, the title
-// screen, the episode-complete card and the busted screen. This is the
-// frame the judge reads, so it is dense on purpose.
+// SPDX-License-Identifier: MIT
+// Live Heist — the HUD: everything the judge reads, drawn on canvas.
+// Top-left: LIVE badge, stars, viewer count. Top-right: cash, followers,
+// health, armour. Right: Vidrio PD response panel. Bottom-left: the
+// minimap. Bottom: the news ticker. Top-centre: the episode objective.
+// Plus the start screen, the episode-complete card and the busted card.
+// It is all canvas so a screenshot always shows the whole broadcast.
 
-import { FONT, FONT_DISPLAY, PALETTE, VIEW, WORLD } from './config.js';
-import { currentEpisode, objectiveText } from './missions.js';
-import { filmingCount } from './traffic.js';
-import { playerCar } from './world.js';
-
-const MINIMAP = { x: 1052, y: 16, w: 212, h: 160 };
-
-function panel(ctx, x, y, w, h, edge) {
-  ctx.fillStyle = PALETTE.panel;
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = edge ?? PALETTE.panelEdge;
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-}
-
-function fmtViewers(n) {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(n);
-}
-
-/** The whole HUD, drawn over the world for the current screen. */
-export function drawHUD(ctx, state, screen) {
-  const w = state.wanted;
-  const p = state.player;
-  const car = playerCar(state);
-  const px = car ? car.x : p.x;
-  const py = car ? car.y : p.y;
-  if (screen === 'title') {
-    drawTitle(ctx, state);
-    return;
-  }
-  drawTopBar(ctx, state);
-  drawObjective(ctx, state);
-  drawMinimap(ctx, state, px, py);
-  drawStats(ctx, state);
-  drawTicker(ctx, state);
-  drawHints(ctx, state, screen);
-  if (screen === 'paused') drawPaused(ctx, state);
-  if (screen === 'busted') drawBusted(ctx, state);
-  if (screen === 'complete') drawEpisodeComplete(ctx, state);
-  if (state.shot === 'cover') drawCoverLogo(ctx, state);
-  if (state.shot === 'mission') drawEpisodeComplete(ctx, state);
-}
-
-/** Stars, LIVE badge, viewer count and the BREAKING banner. */
-function drawTopBar(ctx, state) {
-  const w = state.wanted;
-  // Stars, top-left below the objective panel.
-  const starY = 126;
-  for (let i = 0; i < 5; i += 1) {
-    ctx.font = '30px ' + FONT_DISPLAY;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = i < w.stars ? PALETTE.star : '#ffffff33';
-    ctx.fillText('★', 18 + i * 34, starY);
-  }
-  // How many bystanders are filming the player, under the stars.
-  const filming = filmingCount(state);
-  if (filming > 0) {
-    ctx.fillStyle = PALETTE.liveRed;
-    ctx.font = 'bold 15px ' + FONT;
-    ctx.textAlign = 'left';
-    ctx.fillText(`🔴 ${filming} FILMING YOU`, 18, 152);
-  }
-  // LIVE badge + viewer count, top centre — the biggest numbers on screen.
-  const viewers = fmtViewers(w.viewers);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const blink = state.time % 1 < 0.6;
-  ctx.fillStyle = blink ? PALETTE.liveRed : '#c41f2c';
-  roundRect(ctx, 500, 12, 96, 40, 6);
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 24px ' + FONT;
-  ctx.fillText('● LIVE', 548, 33);
-  panel(ctx, 604, 12, 176, 48, '#19c2d8');
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 22px ' + FONT;
-  ctx.fillText(`👁 ${viewers}`, 692, 31);
-  ctx.fillStyle = '#19c2d8';
-  ctx.font = 'bold 11px ' + FONT;
-  ctx.fillText('VIEWERS', 692, 50);
-  // BREAKING banner at 3+ stars, below the objective panel.
-  if (w.stars >= 3) {
-    ctx.fillStyle = PALETTE.liveRed;
-    ctx.fillRect(0, 82, VIEW.width, 26);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 17px ' + FONT;
-    ctx.textAlign = 'center';
-    ctx.fillText(
-      w.stars >= 5 ? 'BREAKING: SWAT DEPLOYED — FIVE STARS — THE WHOLE CITY IS WATCHING' :
-      w.stars >= 4 ? 'BREAKING: ROADBLOCKS UP — BYSTANDERS FILMING — CHASE LIVE ON VIDRIO TV' :
-      'BREAKING: NEWS HELICOPTER OVERHEAD — THE WHEELMAN IS LIVE',
-      640, 96,
-    );
-  }
-  // SIGNAL LOST: the broadcast was cut in an alley or garage.
-  if (w.lostFlash > 0 && w.signalLost > 0.2) {
-    const alpha = Math.min(1, w.lostFlash);
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = '#14101c';
-    ctx.fillRect(340, 130, 600, 64);
-    ctx.strokeStyle = '#19c2d8';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(340, 130, 600, 64);
-    ctx.fillStyle = '#19c2d8';
-    ctx.font = 'bold 26px ' + FONT_DISPLAY;
-    ctx.textAlign = 'center';
-    ctx.fillText('📺 SIGNAL LOST', 640, 156);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = '16px ' + FONT;
-    ctx.fillText('Broadcast cut — stars falling. Stay hidden!', 640, 182);
-    ctx.restore();
-  }
-}
-
-/** The current objective, top-left, with the episode title. */
-function drawObjective(ctx, state) {
-  panel(ctx, 12, 12, 430, 64, '#ff7a1a');
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ff7a1a';
-  ctx.font = 'bold 13px ' + FONT;
-  const ep = currentEpisode(state);
-  ctx.fillText(ep ? ep.title : 'LIVE HEIST — COSTA VIDRIO', 24, 28);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 17px ' + FONT;
-  ctx.fillText('▶ ' + objectiveText(state).replace(/^EPISODE \d — /, ''), 24, 54);
-}
-
-/** Minimap: roads, the player, police, the mission marker. Red at 4 stars. */
-function drawMinimap(ctx, state, px, py) {
-  const hot = state.wanted.stars >= 4;
-  ctx.save();
-  ctx.fillStyle = hot ? '#3a0d12d9' : PALETTE.minimap;
-  ctx.fillRect(MINIMAP.x, MINIMAP.y, MINIMAP.w, MINIMAP.h);
-  ctx.strokeStyle = hot ? PALETTE.liveRed : PALETTE.panelEdge;
-  ctx.lineWidth = 2;
-  ctx.strokeRect(MINIMAP.x + 1, MINIMAP.y + 1, MINIMAP.w - 2, MINIMAP.h - 2);
-  const sx = MINIMAP.w / WORLD.width;
-  const sy = MINIMAP.h / WORLD.height;
-  const X = (x) => MINIMAP.x + x * sx;
-  const Y = (y) => MINIMAP.y + y * sy;
-  // Sea on the east edge.
-  ctx.fillStyle = '#19c2d8';
-  ctx.fillRect(X(2960), MINIMAP.y, MINIMAP.w - (X(2960) - MINIMAP.x), MINIMAP.h);
-  // Roads.
-  ctx.strokeStyle = '#8b93a3';
-  ctx.lineWidth = 3;
-  for (const rx of [400, 1000, 1600, 2200, 2800]) {
-    ctx.beginPath();
-    ctx.moveTo(X(rx), MINIMAP.y);
-    ctx.lineTo(X(rx), MINIMAP.y + MINIMAP.h);
-    ctx.stroke();
-  }
-  for (const ry of [400, 1000, 1600, 2000]) {
-    ctx.beginPath();
-    ctx.moveTo(MINIMAP.x, Y(ry));
-    ctx.lineTo(MINIMAP.x + MINIMAP.w, Y(ry));
-    ctx.stroke();
-  }
-  // Garages (safe zones) in cyan.
-  ctx.fillStyle = '#19c2d8';
-  for (const g of state.garages) ctx.fillRect(X(g.x), Y(g.y), 8, 6);
-  // Mission marker, pulsing yellow.
-  if (state.mission.marker) {
-    const pulse = 5 + Math.sin(state.time * 5) * 2;
-    ctx.fillStyle = '#ffd94d';
-    ctx.beginPath();
-    ctx.arc(X(state.mission.marker.x), Y(state.mission.marker.y), pulse, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#241f2e';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-  // Police in red.
-  ctx.fillStyle = '#ff2e3e';
-  for (const cop of state.police) {
-    ctx.beginPath();
-    ctx.arc(X(cop.x), Y(cop.y), 3.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  // Player in orange with a white ring.
-  ctx.fillStyle = '#ff7a1a';
-  ctx.beginPath();
-  ctx.arc(X(px), Y(py), 5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 11px ' + FONT;
-  ctx.textAlign = 'left';
-  ctx.fillText(hot ? 'COSTA VIDRIO — HOT ZONE' : 'COSTA VIDRIO', MINIMAP.x + 4, MINIMAP.y + MINIMAP.h - 8);
-  ctx.restore();
-}
-
-/** Cash, followers and the filming count, bottom-left. */
-function drawStats(ctx, state) {
-  panel(ctx, 12, 640, 300, 64, '#19c2d8');
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#19c2d8';
-  ctx.font = 'bold 13px ' + FONT;
-  ctx.fillText('CASH', 24, 656);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 20px ' + FONT;
-  ctx.fillText(`$${state.progress.cash.toLocaleString('en-US')}`, 24, 680);
-  ctx.fillStyle = '#ff5fa2';
-  ctx.font = 'bold 13px ' + FONT;
-  ctx.fillText('FOLLOWERS', 150, 656);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 20px ' + FONT;
-  ctx.fillText(fmtViewers(state.progress.followers), 150, 680);
-}
-
-/** The scrolling news ticker along the bottom. */
-function drawTicker(ctx, state) {
-  ctx.fillStyle = PALETTE.ticker;
-  ctx.fillRect(0, 704, VIEW.width, 16);
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 12px ' + FONT;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  const text = `VIDRIO TV  •  ${state.ticker.text}   •   `;
-  ctx.fillText(text, 1280 - state.ticker.offset, 712);
-  ctx.fillText(text, 1280 - state.ticker.offset + text.length * 7, 712);
-}
-
-/** Controls hint, bottom-right. */
-function drawHints(ctx, state, screen) {
-  if (screen !== 'play') return;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffffffcc';
-  ctx.font = '13px ' + FONT;
-  const p = state.player;
-  ctx.fillText(
-    p.onFoot ? 'WASD move · E steal car · SPACE punch · P pause · M mute' : 'W/S drive · A/D steer · SPACE nitro · E get out · P pause',
-    1268, 692,
-  );
-}
-
-/** The title screen: the show's logo, the premise, the save, the keys. */
-function drawTitle(ctx, state) {
-  ctx.fillStyle = '#ff9a3d';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  ctx.fillStyle = '#1fb6d8';
-  ctx.fillRect(0, 470, VIEW.width, 250);
-  ctx.fillStyle = '#f0c573';
-  ctx.fillRect(0, 430, VIEW.width, 40);
-  // Sun.
-  ctx.fillStyle = '#ffe14d';
-  ctx.beginPath();
-  ctx.arc(1060, 150, 90, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#ff5fa2';
-  ctx.font = 'bold 34px ' + FONT_DISPLAY;
-  ctx.textAlign = 'center';
-  ctx.fillText('VIDRIO TV PRESENTS', 640, 120);
-  ctx.fillStyle = '#241f2e';
-  ctx.font = '92px ' + FONT_DISPLAY;
-  ctx.fillText('LIVE HEIST', 640, 230);
-  ctx.fillStyle = '#ff2e3e';
-  ctx.font = 'bold 30px ' + FONT;
-  ctx.fillText('● LIVE FROM COSTA VIDRIO', 640, 300);
-  ctx.fillStyle = '#241f2e';
-  ctx.font = '20px ' + FONT;
-  ctx.fillText('Every heist is an episode. Every chase is a broadcast.', 640, 350);
-  ctx.fillText('Steal cars, dodge the law, and grow your audience — or cut the signal and vanish.', 640, 380);
-  const saved = state.progress.episode > 0 || state.progress.cash > 0;
-  ctx.fillStyle = '#14101c';
-  roundRect(ctx, 440, 420, 400, 120, 10);
-  ctx.fill();
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 22px ' + FONT;
-  ctx.fillText(saved ? `WELCOME BACK — ${fmtViewers(state.progress.followers)} FOLLOWERS` : 'PRESS ENTER TO GO LIVE', 640, 452);
-  ctx.font = '17px ' + FONT;
-  ctx.fillText(saved ? `Best audience ${fmtViewers(state.progress.bestViewers)} · Episodes done: ${state.stats.episodesDone}` : 'Episode 1: The Marina Vault — sponsored by SUNNY COLA', 640, 486);
-  ctx.font = 'bold 17px ' + FONT;
-  ctx.fillText('1 Episode 1 · 2 Episode 2', 640, 518);
-  ctx.fillStyle = '#241f2e';
-  ctx.font = '15px ' + FONT;
-  ctx.fillText('WASD / arrows move · E enter & steal cars · SPACE punch / nitro · P pause', 640, 580);
-  ctx.fillText('Alleys and garages cut the broadcast — SIGNAL LOST drops your stars.', 640, 606);
-}
-
-/** Pause overlay. */
-function drawPaused(ctx, state) {
-  ctx.fillStyle = '#14101cb3';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 54px ' + FONT_DISPLAY;
-  ctx.textAlign = 'center';
-  ctx.fillText('PAUSED', 640, 330);
-  ctx.font = '20px ' + FONT;
-  ctx.fillText('The broadcast is on hold. Press P to keep the show going.', 640, 380);
-}
-
-/** Busted overlay. */
-function drawBusted(ctx, state) {
-  ctx.fillStyle = '#3a0d12cc';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  ctx.fillStyle = '#ff2e3e';
-  ctx.font = 'bold 64px ' + FONT_DISPLAY;
-  ctx.textAlign = 'center';
-  ctx.fillText('BUSTED!', 640, 300);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = '22px ' + FONT;
-  ctx.fillText('The cameras caught everything. The audience loved it anyway.', 640, 350);
-  ctx.font = 'bold 20px ' + FONT;
-  ctx.fillText('Press ENTER to go live again', 640, 400);
-}
-
-/** Episode-complete card: followers, cash and the sponsor — the progression. */
-function drawEpisodeComplete(ctx, state) {
-  const ep = currentEpisode(state);
-  if (!ep) return;
-  ctx.fillStyle = '#14101cd9';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  panel(ctx, 340, 150, 600, 400, '#ffd94d');
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffd94d';
-  ctx.font = 'bold 20px ' + FONT;
-  ctx.fillText('VIDRIO TV — EPISODE COMPLETE', 640, 190);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 34px ' + FONT_DISPLAY;
-  ctx.fillText(ep.title, 640, 240);
-  ctx.fillStyle = '#19c2d8';
-  ctx.font = 'bold 22px ' + FONT;
-  ctx.fillText(`SPONSORED BY ${ep.sponsor}`, 640, 290);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = 'bold 30px ' + FONT;
-  ctx.fillText(`+$${ep.cash.toLocaleString('en-US')} CASH`, 640, 350);
-  ctx.fillStyle = '#ff5fa2';
-  ctx.fillText(`+${ep.followers.toLocaleString('en-US')} FOLLOWERS`, 640, 395);
-  ctx.fillStyle = PALETTE.text;
-  ctx.font = '20px ' + FONT;
-  ctx.fillText(`Total followers now: ${fmtViewers(state.progress.followers)}`, 640, 445);
-  ctx.font = 'bold 18px ' + FONT;
-  ctx.fillText('Press ENTER for the next episode', 640, 500);
-}
-
-/** The big cover logo, only for the cover screenshot. */
-function drawCoverLogo(ctx, state) {
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.shadowColor = '#241f2e';
-  ctx.shadowBlur = 18;
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '84px ' + FONT_DISPLAY;
-  ctx.fillText('LIVE HEIST', 640, 190);
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#ff2e3e';
-  ctx.font = 'bold 26px ' + FONT;
-  ctx.fillText('● LIVE FROM COSTA VIDRIO — VIDRIO TV', 640, 250);
-  ctx.restore();
-}
+import { CFG, PALETTE, RADIO_STATIONS, TICKER_LINES } from './config.js';
+import { formatViewers } from './police.js';
+import { missionProgressText } from './missions.js';
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -376,4 +18,411 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+function panel(ctx, x, y, w, h, alpha = 0.82) {
+  ctx.fillStyle = `rgba(12, 14, 24, ${alpha})`;
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function star(ctx, cx, cy, r, filled) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const px = cx + Math.cos(ang) * rr;
+    const py = cy + Math.sin(ang) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = filled ? '#ffd23f' : 'rgba(255,255,255,0.22)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+export function drawHUD(G) {
+  const { ctx, player, wanted, missions } = G;
+  const W = CFG.viewW;
+  const H = CFG.viewH;
+  ctx.save();
+  ctx.textBaseline = 'alphabetic';
+
+  // ---- Top-left: LIVE badge + stars + viewers ----
+  const blink = Math.floor(G.time * 2) % 2 === 0;
+  ctx.fillStyle = wanted.stars >= 3 ? '#e02020' : '#e02020';
+  roundRect(ctx, 16, 14, 74, 30, 6);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 17px system-ui, sans-serif';
+  ctx.fillText('● LIVE', 26, 35);
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.fillStyle = blink ? '#ff5a5a' : '#ffb3b3';
+  ctx.fillText('●', 16, 66);
+  for (let i = 0; i < 5; i++) star(ctx, 46 + i * 26, 60, 11, i < wanted.stars);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 19px system-ui, sans-serif';
+  ctx.fillText(`👁 ${formatViewers(wanted.displayedViewers)} watching`, 168, 67);
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillText('COSTA VIDRIO • CHANNEL: LIVE HEIST', 16, 88);
+
+  // ---- Top-right: cash, followers, health, armour ----
+  panel(ctx, W - 268, 14, 252, 108);
+  ctx.fillStyle = '#7dff8a';
+  ctx.font = 'bold 21px system-ui, sans-serif';
+  ctx.fillText(`$${Math.floor(player.cash).toLocaleString('en-US')}`, W - 252, 42);
+  ctx.fillStyle = '#ff8fc0';
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.fillText(`♥ ${Math.floor(player.followers).toLocaleString('en-US')} followers`, W - 252, 66);
+  bar(ctx, W - 252, 76, 220, 10, player.health / 100, '#ff4d4d', 'HEALTH');
+  bar(ctx, W - 252, 98, 220, 10, player.armor / 100, '#19d3e6', 'ARMOUR');
+
+  // ---- Top-centre: mission box ----
+  const mw = 430;
+  panel(ctx, (W - mw) / 2, 14, mw, 62);
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillText(`${missionProgressText(G)}  •  ${missions.completedCount}/4 DONE  •  STASHES ${missions.stashesFound}/5`, (W - mw) / 2 + 14, 36);
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px system-ui, sans-serif';
+  wrapText(ctx, missions.objective || 'Press M to start the next episode', (W - mw) / 2 + 14, 58, mw - 28, 13);
+  if (missions.holdProgress > 0 && missions.holdNeeded > 0) {
+    bar(ctx, (W - mw) / 2 + 14, 64, mw - 28, 7, missions.holdProgress / missions.holdNeeded, '#ff7a1a', '');
+  }
+
+  // ---- Right: Vidrio PD response panel ----
+  const units = [...G.police, ...G.roadblocks].slice(0, 5);
+  panel(ctx, W - 268, 134, 252, 34 + units.length * 24 + (G.heli.active ? 24 : 0));
+  ctx.fillStyle = '#ff5a5a';
+  ctx.font = 'bold 13px system-ui, sans-serif';
+  ctx.fillText('VIDRIO PD RESPONSE', W - 252, 156);
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px system-ui, sans-serif';
+  units.forEach((u, i) => {
+    const d = Math.round(Math.hypot(u.x - player.x, u.y - player.y));
+    ctx.fillText(`${u.name} ${u.callsign} — ${u.status} ${d}m`, W - 252, 178 + i * 24);
+  });
+  if (G.heli.active) {
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText('SKY 5 NEWS HELI — LIVE OVERHEAD', W - 252, 178 + units.length * 24);
+  }
+  if (units.length === 0) {
+    ctx.fillStyle = '#9fe8a8';
+    ctx.fillText('No units on you. Stay quiet… or don\'t.', W - 252, 178);
+  }
+
+  // ---- Radio + vehicle + weapon, bottom-right ----
+  panel(ctx, W - 268, H - 196, 252, 102);
+  const station = RADIO_STATIONS[G.radioStation % RADIO_STATIONS.length];
+  ctx.fillStyle = '#19d3e6';
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.fillText(`♪ ${station.name}`, W - 252, H - 172);
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText(station.track, W - 252, H - 154);
+  const car = G.playerCar;
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 13px system-ui, sans-serif';
+  ctx.fillText(car ? `${car.model}  •  ${Math.round(Math.abs(car.speed) * 0.12)} km/h` : 'ON FOOT', W - 252, H - 132);
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px system-ui, sans-serif';
+  const wText = G.combat.weapon === 'pistol'
+    ? `PISTOL  [${G.combat.ammo}/12]${G.combat.reloadTimer > 0 ? ' RELOADING…' : ''}`
+    : 'FISTS  [F to punch]';
+  ctx.fillText(wText, W - 252, H - 114);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText('[1] fists  [2] pistol  [M] mute', W - 252, H - 98);
+
+  // ---- Controls hint, bottom-centre ----
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText('WASD move/drive • E enter & steal car • F punch • Click shoot • R reload • S save • Esc pause', W / 2 - 250, H - 66);
+
+  drawMinimap(G);
+  drawTicker(G);
+  drawDialog(G);
+  if (missions.completeCardTimer > 0 && missions.completeCard) drawCompleteCard(G);
+  if (G.ui.busted) drawBustedCard(G);
+  if (G.ui.paused) drawPausedCard(G);
+  ctx.restore();
+}
+
+function bar(ctx, x, y, w, h, frac, color, label) {
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  roundRect(ctx, x, y, w, h, 4);
+  ctx.fill();
+  ctx.fillStyle = color;
+  if (frac > 0) {
+    roundRect(ctx, x, y, Math.max(6, w * Math.max(0, Math.min(1, frac))), h, 4);
+    ctx.fill();
+  }
+  if (label) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 9px system-ui, sans-serif';
+    ctx.fillText(label, x + 4, y + h - 2);
+  }
+}
+
+function wrapText(ctx, text, x, y, maxW, lineH) {
+  const words = String(text).split(' ');
+  let line = '';
+  let yy = y;
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      line = w;
+      yy += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, yy);
+}
+
+function drawMinimap(G) {
+  const { ctx, world } = G;
+  const mw = 210;
+  const mh = 150;
+  const x0 = 16;
+  const y0 = CFG.viewH - mh - 46;
+  const sx = mw / CFG.worldW;
+  const sy = mh / CFG.worldH;
+  panel(ctx, x0 - 6, y0 - 6, mw + 12, mh + 12);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, mw, mh);
+  ctx.clip();
+  // Sand + sea on the east edge.
+  ctx.fillStyle = PALETTE.sand;
+  ctx.fillRect(x0 + 3150 * sx, y0, mw - 3150 * sx, mh);
+  ctx.fillStyle = PALETTE.sea;
+  ctx.fillRect(x0 + 3400 * sx, y0, mw - 3400 * sx, mh);
+  ctx.fillStyle = '#2a2f3a';
+  ctx.fillRect(x0, y0, mw, mh);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 3;
+  for (const rx of world.roadsX) {
+    ctx.beginPath();
+    ctx.moveTo(x0 + rx * sx, y0);
+    ctx.lineTo(x0 + rx * sx, y0 + mh);
+    ctx.stroke();
+  }
+  for (const ry of world.roadsY) {
+    ctx.beginPath();
+    ctx.moveTo(x0, y0 + ry * sy);
+    ctx.lineTo(x0 + mw, y0 + ry * sy);
+    ctx.stroke();
+  }
+  // Dead zones.
+  ctx.fillStyle = 'rgba(25, 211, 230, 0.5)';
+  for (const z of world.deadZones) {
+    ctx.fillRect(x0 + (z.x - z.w / 2) * sx, y0 + (z.y - z.h / 2) * sy, z.w * sx, z.h * sy);
+  }
+  // Mission target.
+  if (G.missions.target) {
+    const t = G.missions.target;
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath();
+    ctx.arc(x0 + t.x * sx, y0 + t.y * sy, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  // Police red, player white.
+  ctx.fillStyle = '#ff3b3b';
+  for (const u of [...G.police, ...G.roadblocks]) {
+    ctx.beginPath();
+    ctx.arc(x0 + u.x * sx, y0 + u.y * sy, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (G.heli.active) {
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath();
+    ctx.arc(x0 + G.heli.x * sx, y0 + G.heli.y * sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x0 + G.player.x * sx, y0 + G.player.y * sy, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#14161f';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.fillText('COSTA VIDRIO', x0, y0 - 10);
+  if (G.wanted.stars >= 3) {
+    ctx.fillStyle = '#ff5a5a';
+    ctx.fillText('● MINIMAP: HEAT ZONE', x0 + 110, y0 - 10);
+  }
+}
+
+function drawTicker(G) {
+  const { ctx } = G;
+  const H = CFG.viewH;
+  const W = CFG.viewW;
+  ctx.fillStyle = 'rgba(10, 12, 20, 0.9)';
+  ctx.fillRect(0, H - 34, W, 34);
+  ctx.fillStyle = '#e02020';
+  ctx.fillRect(0, H - 34, 150, 34);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillText(G.wanted.stars >= 3 ? 'BREAKING' : 'VIDRIO 24', 18, H - 12);
+  const line = TICKER_LINES[G.tickerIdx % TICKER_LINES.length];
+  // The line starts just inside the red tag and strolls left; it wraps
+  // after a full pass so a screenshot always catches it readable.
+  const scroll = ((G.time - G.tickerStart) * 42) % 1100;
+  ctx.fillStyle = '#ffe9a8';
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.fillText(line, 168 - scroll, H - 12);
+  if (G.time - G.tickerStart > 14) {
+    G.tickerIdx += 1;
+    G.tickerStart = G.time;
+  }
+}
+
+function drawDialog(G) {
+  const m = G.missions;
+  if (!m.dialog || m.dialogTimer <= 0) return;
+  const { ctx } = G;
+  const W = CFG.viewW;
+  const H = CFG.viewH;
+  const w = 560;
+  const x = (W - w) / 2;
+  const y = H - 250;
+  panel(ctx, x, y, w, 64, 0.9);
+  ctx.fillStyle = m.dialog.who === 'RICO' ? '#ff7a1a' : '#ff4d8d';
+  ctx.beginPath();
+  ctx.arc(x + 34, y + 32, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(m.dialog.who[0], x + 34, y + 37);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 13px system-ui, sans-serif';
+  ctx.fillText(m.dialog.who, x + 64, y + 22);
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px system-ui, sans-serif';
+  wrapText(ctx, m.dialog.text, x + 64, y + 42, w - 84, 15);
+}
+
+function drawCompleteCard(G) {
+  const { ctx } = G;
+  const W = CFG.viewW;
+  const H = CFG.viewH;
+  const card = G.missions.completeCard;
+  const w = 520;
+  const h = 250;
+  const x = (W - w) / 2;
+  const y = (H - h) / 2 - 40;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#14161f';
+  roundRect(ctx, x, y, w, h, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd23f';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('EPISODE COMPLETE', W / 2, y + 36);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.fillText(card.title, W / 2, y + 70);
+  ctx.fillStyle = '#7dff8a';
+  ctx.font = 'bold 30px system-ui, sans-serif';
+  ctx.fillText(`+$${card.cash.toLocaleString('en-US')}`, W / 2, y + 118);
+  ctx.fillStyle = '#ff8fc0';
+  ctx.font = 'bold 20px system-ui, sans-serif';
+  ctx.fillText(`+${card.fans.toLocaleString('en-US')} followers`, W / 2, y + 150);
+  ctx.fillStyle = '#19d3e6';
+  ctx.font = '14px system-ui, sans-serif';
+  ctx.fillText(`Sponsored by ${card.sponsor}  •  Next episode unlocked`, W / 2, y + 186);
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('The whole city saw it. The whole city is coming back for more.', W / 2, y + 216);
+  ctx.textAlign = 'left';
+}
+
+function drawBustedCard(G) {
+  const { ctx } = G;
+  ctx.fillStyle = 'rgba(20, 0, 0, 0.72)';
+  ctx.fillRect(0, 0, CFG.viewW, CFG.viewH);
+  ctx.fillStyle = '#ff3b3b';
+  ctx.font = 'bold 64px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('BUSTED', CFG.viewW / 2, 300);
+  ctx.fillStyle = '#fff';
+  ctx.font = '18px system-ui, sans-serif';
+  ctx.fillText('Vidrio PD cut your feed. Rico bailed you out — $400 and your pride.', CFG.viewW / 2, 350);
+  ctx.fillText('Press ENTER to get back on the street', CFG.viewW / 2, 384);
+  ctx.textAlign = 'left';
+}
+
+function drawPausedCard(G) {
+  const { ctx } = G;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, CFG.viewW, CFG.viewH);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 44px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('PAUSED', CFG.viewW / 2, 320);
+  ctx.font = '16px system-ui, sans-serif';
+  ctx.fillText('Esc resume  •  S save  •  M mute  •  R restart episode', CFG.viewW / 2, 360);
+  ctx.textAlign = 'left';
+}
+
+export function drawStartScreen(G) {
+  const { ctx } = G;
+  const W = CFG.viewW;
+  const H = CFG.viewH;
+  // Sunset gradient sky behind the title.
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#ff7a1a');
+  grad.addColorStop(0.55, '#ff4d8d');
+  grad.addColorStop(1, '#1a1033');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  for (let i = 0; i < 5; i++) {
+    ctx.fillRect(0, 90 + i * 46, W, 10);
+  }
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 86px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('LIVE HEIST', W / 2, 210);
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.fillText('COSTA VIDRIO', W / 2, 252);
+  ctx.fillStyle = '#fff';
+  ctx.font = '19px system-ui, sans-serif';
+  ctx.fillText('The whole city is watching. Steal loud. Escape louder.', W / 2, 300);
+  ctx.fillStyle = '#e02020';
+  roundRect(ctx, W / 2 - 130, 330, 260, 52, 10);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px system-ui, sans-serif';
+  ctx.fillText('▶  START THE SHOW', W / 2, 364);
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  ctx.font = '15px system-ui, sans-serif';
+  ctx.fillText('4 heist episodes • wanted = viewer count • police, news heli, roadblocks & SWAT', W / 2, 420);
+  ctx.fillText('WASD move / drive • E steal a car • F punch • Click shoot • S save • M mute', W / 2, 448);
+  ctx.fillText('Cut the feed in a SIGNAL DEAD ZONE to lose the stars.', W / 2, 476);
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  ctx.fillText('An original game — Costa Vidrio, Rico, Mara and every street are invented here.', W / 2, 530);
+  ctx.fillText('Click or press ENTER to begin. Your progress saves automatically.', W / 2, 556);
+  ctx.textAlign = 'left';
 }

@@ -1,75 +1,72 @@
-// Keyboard and pointer input for LIVE HEIST. Held keys give a steering
-// direction; one-shot presses (interact, punch/boost, pause, confirm) are
-// queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// SPDX-License-Identifier: MIT
+// Live Heist — keyboard + mouse input.
+// One tiny object owns every key and click so the game loop never
+// touches the DOM events directly.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_INTERACT = 4;
-export const ACTION_PUNCH = 8;
-export const ACTION_MUTE = 16;
+export function createInput(canvas) {
+  const input = {
+    keys: new Set(),
+    mouse: { x: 0, y: 0, down: false, clicked: false },
+    pressed: new Set(),
+    anyKey: false,
+  };
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Enter']);
-const INTERACT = new Set(['KeyE']);
-const PUNCH = new Set(['Space']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const MUTE = new Set(['KeyM']);
-
-export function createInput(target) {
-  const held = new Set();
-  let actions = 0;
-
-  window.addEventListener('keydown', (event) => {
-    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)) {
-      held.add(event.code);
-    } else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (INTERACT.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_INTERACT;
-    } else if (PUNCH.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PUNCH;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else if (MUTE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_MUTE;
-    } else {
-      return;
-    }
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    held.delete(event.code);
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    held.clear();
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
-
-  function has(set) {
-    for (const code of set) if (held.has(code)) return true;
-    return false;
+  function keyName(e) {
+    return e.key.length === 1 ? e.key.toLowerCase() : e.key;
   }
 
-  return {
-    /** -1/0/1 on each axis, from the held movement keys. */
-    moveX() {
-      return (has(RIGHT) ? 1 : 0) - (has(LEFT) ? 1 : 0);
-    },
-    moveY() {
-      return (has(DOWN) ? 1 : 0) - (has(UP) ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-  };
+  window.addEventListener('keydown', (e) => {
+    const k = keyName(e);
+    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      e.preventDefault();
+    }
+    if (!input.keys.has(k)) input.pressed.add(k);
+    input.keys.add(k);
+    input.anyKey = true;
+  });
+
+  window.addEventListener('keyup', (e) => {
+    input.keys.delete(keyName(e));
+  });
+
+  window.addEventListener('blur', () => {
+    input.keys.clear();
+    input.pressed.clear();
+    input.mouse.down = false;
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    const r = canvas.getBoundingClientRect();
+    input.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+    input.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    input.mouse.down = true;
+    input.mouse.clicked = true;
+    const r = canvas.getBoundingClientRect();
+    input.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+    input.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+  });
+
+  window.addEventListener('mouseup', () => {
+    input.mouse.down = false;
+  });
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  return input;
+}
+
+export function isDown(input, ...names) {
+  return names.some((n) => input.keys.has(n));
+}
+
+export function wasPressed(input, name) {
+  return input.pressed.has(name);
+}
+
+export function endFrame(input) {
+  input.pressed.clear();
+  input.mouse.clicked = false;
+  input.anyKey = false;
 }
