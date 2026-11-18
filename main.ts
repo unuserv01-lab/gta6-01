@@ -1,36 +1,47 @@
-// LIVE HEIST — the entry program (Node 22, standard library only). It hands
-// the game in: copies this directory's game/ and screenshots/ to /output and
-// writes /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library. The game itself is plain static files a desktop browser
-// loads offline (game/index.html and its ES modules, no library, no network
-// request). Deterministic: the same repository always writes the same bytes.
-// Run it outside the grader with MAKEFUN_OUTPUT_DIR standing in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// SPDX-License-Identifier: MIT
+// LIVE HEIST — the entry program (make.fun gta6-01).
+// Copies game/ and screenshots/ from this repository into the output
+// directory and writes dossier.json with the kit's buildDossier, so
+// the sealed scorer can check the entry byte for byte. Runs on Node
+// 22 with the standard library only; no network, no install step.
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const REPO_ROOT = resolve(import.meta.dirname ?? '.');
+const OUT_DIR = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+function copyTree(fromDir, toDir) {
+  rmSync(toDir, { recursive: true, force: true });
+  mkdirSync(toDir, { recursive: true });
+  cpSync(fromDir, toDir, { recursive: true, dereference: false });
+}
 
-// The scorer's own caps: only text_max_bytes shapes the bytes; the others
-// refuse an entry the scorer would refuse (more than 4 screenshots or one
-// over 256 KiB; more than 993 files in game/ or 48 MiB of game files, in
-// all, or a path under game/ over 1000 bytes).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
+function main() {
+  const gameDir = join(REPO_ROOT, 'game');
+  const shotsDir = join(REPO_ROOT, 'screenshots');
+  if (!existsSync(join(gameDir, 'index.html'))) {
+    throw new Error('game/index.html is missing — nothing to hand in');
+  }
+  mkdirSync(OUT_DIR, { recursive: true });
+  copyTree(gameDir, join(OUT_DIR, 'game'));
+  if (existsSync(shotsDir)) {
+    copyTree(shotsDir, join(OUT_DIR, 'screenshots'));
+  }
+  const dossier = buildDossier(OUT_DIR, {
     text_max_bytes: 163840,
     screenshots: { max: 4, max_bytes: 262144 },
     game_max_files: 993,
     game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+  });
+  writeFileSync(join(OUT_DIR, 'dossier.json'), dossier);
+  const shotCount = existsSync(shotsDir) ? countShots(shotsDir) : 0;
+  console.log(`LIVE HEIST handed in: game/ + ${shotCount} screenshot(s), dossier ${dossier.length} bytes -> ${OUT_DIR}`);
+}
+
+function countShots(dir) {
+  return readdirSync(dir).filter((f) => statSync(join(dir, f)).isFile()).length;
+}
+
+main();
