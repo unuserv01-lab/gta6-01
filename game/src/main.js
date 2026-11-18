@@ -1,241 +1,289 @@
-// LIVE HEIST — boot and the one loop. Input is read every frame, the world
-// advances in fixed 1/60 s steps (several in a slow frame, none in a fast
-// one), and the renderer paints what is there. The game moves between five
-// screens: title, play, paused, busted and episode-complete.
-//
-// ?seed=N fixes the city and the traffic. ?shot=1..4 (with &seed=N) stages
-// that scene instead of running the loop, paints it twice and sets
-// window.__shotReady for a screenshot. Progress is saved to localStorage.
+// SPDX-License-Identifier: MIT
+// Live Heist — main: the game loop and the shared state.
+// Builds the world, wires every system together, runs the loop at the
+// browser's pace, and keeps the camera glued to the player. The start
+// screen waits for a click; after that it is all Costa Vidrio.
 
-import { SAVE_KEY, STEP } from './config.js';
-import { createWorld, setTicker } from './world.js';
-import { createInput, ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH } from './input.js';
-import { createRenderer, SCREEN_BUSTED, SCREEN_COMPLETE, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-import { stepPlayer, tryEnterCar, exitCar } from './vehicles.js';
-import { stepPedestrians, stepTrafficCars } from './traffic.js';
-import { EVENT_BUSTED, stepPolice, syncPolice, updateWanted } from './police.js';
-import { stepHeli } from './heli.js';
-import { EVENT_MISSION_DONE, startEpisode, stepMissions } from './missions.js';
-import { punch, stepCombat } from './combat.js';
-import { stepWorld } from './world.js';
-import { createAudio } from './audio.js';
+import { CFG, PALETTE } from './config.js';
+import { createInput, isDown, wasPressed, endFrame } from './input.js';
+import { buildWorld, pointInBuilding, clampToWorld } from './world.js';
+import { spawnTraffic, spawnPeds, updateTraffic, updatePeds } from './traffic.js';
+import { nearestStealable, stealCar, exitCar, updatePlayerCar, collideCarsWithWorld, makePlayerCar } from './vehicles.js';
+import { createWanted, updateWanted, updatePolice, resetAfterBusted } from './police.js';
+import { createHeli, updateHeli } from './heli.js';
+import { createMissions, updateMissions, startEpisode } from './missions.js';
+import { createCombat, updateCombat } from './combat.js';
+import { createAudio, ensureAudio, attachAudioHelpers, updateAudio, toggleMute } from './audio.js';
+import { drawHUD, drawStartScreen } from './hud.js';
+import { renderWorld, createParticles } from './render.js';
+import { sceneFromUrl, stageScene } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+const SAVE_KEY = 'live-heist-costa-vidrio-v1';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+function createGame(canvas) {
+  const ctx = canvas.getContext('2d');
+  const world = buildWorld();
+  const G = {
+    canvas,
+    ctx,
+    time: 0,
+    world,
+    input: createInput(canvas),
+    player: {
+      x: 640, y: 760, angle: -Math.PI / 2,
+      speed: 0, inCar: false,
+      health: CFG.playerMaxHealth,
+      armor: 50,
+      cash: CFG.startCash,
+      followers: CFG.startFollowers,
+      walkPhase: 0,
+    },
+    camera: { x: 0, y: 400, shake: 0 },
+    wanted: createWanted(),
+    missions: createMissions(),
+    combat: createCombat(),
+    audio: createAudio(),
+    heli: createHeli(),
+    particles: createParticles(),
+    traffic: [],
+    peds: [],
+    parkedCars: [],
+    police: [],
+    roadblocks: [],
+    playerCar: null,
+    missionCar: null,
+    stealTarget: null,
+    feed: [],
+    stats: { carsStolen: 0, copsDown: 0, playSeconds: 0 },
+    ui: { started: false, paused: false, busted: false, bustedTimer: 0, deadZoneNotice: false },
+    radioStation: 0,
+    tickerIdx: 0,
+    tickerStart: 0,
+    policeTimer: 0,
+    roadblockTimer: 8,
+    copFireTimer: 1,
+    saveGame,
+    loadGame,
+  };
+  G.traffic = spawnTraffic(world);
+  G.peds = spawnPeds(world);
+  // Parked cars come from the world's blocks.
+  G.parkedCars = world.parked.map((p, i) => ({
+    id: 'park' + i, x: p.x, y: p.y, angle: p.angle,
+    color: p.color, model: p.model, speed: 0,
+  }));
+  attachAudioHelpers(G);
+  return G;
+}
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const state = createWorld(seed);
-const renderer = createRenderer(canvas);
-const audio = createAudio();
+function saveGame() {
+  const G = window.__LIVEHEIST__;
+  if (!G) return;
+  try {
+    const data = {
+      cash: G.player.cash,
+      followers: G.player.followers,
+      health: G.player.health,
+      armor: G.player.armor,
+      x: G.player.x,
+      y: G.player.y,
+      completed: G.missions.completedCount,
+      stashes: G.missions.stashesFound,
+      carsStolen: G.stats.carsStolen,
+      savedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    G.feed.push('Progress saved');
+  } catch (err) {
+    // Storage may be unavailable; the game plays on regardless.
+  }
+}
 
-// Debug hook for play-testing: window.__LH is the live simulation state.
-window.__LH = state;
-
-function readSave() {
+function loadGame(G) {
   try {
     const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const save = JSON.parse(raw);
-    if (typeof save.cash !== 'number' || typeof save.followers !== 'number') return null;
-    return save;
-  } catch {
-    return null;
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    G.player.cash = d.cash ?? CFG.startCash;
+    G.player.followers = d.followers ?? CFG.startFollowers;
+    G.player.health = d.health ?? CFG.playerMaxHealth;
+    G.player.armor = d.armor ?? 50;
+    G.player.x = d.x ?? 640;
+    G.player.y = d.y ?? 760;
+    G.missions.completedCount = d.completed ?? 0;
+    G.missions.index = d.completed ?? 0;
+    G.missions.stashesFound = d.stashes ?? 0;
+    G.stats.carsStolen = d.carsStolen ?? 0;
+    return true;
+  } catch (err) {
+    return false;
   }
 }
 
-function writeSave() {
-  try {
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      cash: state.progress.cash,
-      followers: state.progress.followers,
-      episode: state.progress.episode,
-      bestViewers: state.progress.bestViewers,
-    }));
-  } catch {
-    // Storage can be off (private windows): progress then lasts this visit only.
+function updatePlayerOnFoot(G, dt) {
+  const { player, input } = G;
+  const mx = (isDown(input, 'd', 'ArrowRight') ? 1 : 0) - (isDown(input, 'a', 'ArrowLeft') ? 1 : 0);
+  const my = (isDown(input, 's', 'ArrowDown') ? 1 : 0) - (isDown(input, 'w', 'ArrowUp') ? 1 : 0);
+  const moving = mx !== 0 || my !== 0;
+  const speed = isDown(input, 'Shift') ? CFG.runSpeed : CFG.walkSpeed;
+  if (moving) {
+    const len = Math.hypot(mx, my);
+    const nx = player.x + (mx / len) * speed * dt;
+    const ny = player.y + (my / len) * speed * dt;
+    player.angle = Math.atan2(my, mx);
+    player.walkPhase += dt * 11;
+    if (!pointInBuilding(G.world, nx, player.y, 12)) player.x = nx;
+    if (!pointInBuilding(G.world, player.x, ny, 12)) player.y = ny;
+    const c = clampToWorld(player.x, player.y);
+    player.x = c.x;
+    player.y = c.y;
+    player.speed = speed;
+  } else {
+    player.speed = 0;
   }
-}
-
-function applySave(save) {
-  if (!save) return;
-  state.progress.cash = save.cash;
-  state.progress.followers = save.followers;
-  state.progress.episode = save.episode ?? 0;
-  state.progress.bestViewers = Math.max(save.bestViewers ?? 0, state.progress.bestViewers);
-  state.stats.episodesDone = save.episode ?? 0;
-}
-
-function runShot(name) {
-  const scene = stageShot(name, state);
-  let painted = 0;
-  function paint() {
-    renderer.draw(state, scene.screen);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let accumulator = 0;
-  let last = performance.now();
-  let pendingActions = 0;
-  applySave(readSave());
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startEpisodePlay(id) {
-    state.mission.done = false;
-    startEpisode(state, id);
-    screen = SCREEN_PLAY;
-    announce(`Episode ${id}. ${state.mission.markerText}`);
-  }
-
-  function startGame() {
-    const save = readSave();
-    if (save && save.episode >= 1) startEpisodePlay(2);
-    else startEpisodePlay(1);
-  }
-
-  function endBusted() {
-    screen = SCREEN_BUSTED;
-    writeSave();
-    audio.busted();
-    announce('Busted. The cameras caught everything.');
-  }
-
-  function endEpisode() {
-    screen = SCREEN_COMPLETE;
-    writeSave();
-    audio.jingle();
-    announce(`Episode complete. ${state.progress.followers} followers.`);
-  }
-
-  function handleActions(actions) {
-    if (actions & ACTION_MUTE) {
-      state.muted = !state.muted;
-      audio.setMuted(state.muted);
-      return;
+  // Aim with the mouse while on foot.
+  if (G.combat.weapon === 'pistol') {
+    const wx = G.camera.x + input.mouse.x;
+    const wy = G.camera.y + input.mouse.y;
+    if (Math.hypot(wx - player.x, wy - player.y) > 40) {
+      player.angle = Math.atan2(wy - player.y, wx - player.x);
     }
-    if (screen === SCREEN_TITLE) {
-      if (actions & ACTION_CONFIRM) {
-        audio.unlock();
-        startGame();
+  }
+}
+
+function updateCamera(G, dt) {
+  const { camera, player } = G;
+  const tx = player.x - CFG.viewW / 2;
+  const ty = player.y - CFG.viewH / 2;
+  camera.x += (tx - camera.x) * Math.min(1, CFG.camLerp * dt);
+  camera.y += (ty - camera.y) * Math.min(1, CFG.camLerp * dt);
+  camera.x = Math.max(-60, Math.min(CFG.worldW - CFG.viewW + 60, camera.x));
+  camera.y = Math.max(-60, Math.min(CFG.worldH - CFG.viewH + 60, camera.y));
+  if (camera.shake > 0) {
+    camera.shake = Math.max(0, camera.shake - dt * 26);
+    camera.x += (Math.random() - 0.5) * camera.shake;
+    camera.y += (Math.random() - 0.5) * camera.shake;
+  }
+}
+
+function update(G, dt) {
+  G.time += dt;
+  G.stats.playSeconds += dt;
+  const { input, player } = G;
+
+  if (wasPressed(input, 'm')) {
+    G.audio.muted = toggleMute(G);
+    G.feed.push(G.audio.muted ? 'Sound muted' : 'Sound on');
+  }
+  if (wasPressed(input, 'Escape')) {
+    G.ui.paused = !G.ui.paused;
+  }
+  if (G.ui.paused) return;
+  if (wasPressed(input, 's') && G.ui.started) saveGame();
+
+  // Busted: wait for ENTER, then reset at Rico's garage.
+  if (G.ui.busted) {
+    G.ui.bustedTimer += dt;
+    if (G.ui.bustedTimer > 0.8 && (wasPressed(input, 'Enter') || input.mouse.clicked)) {
+      resetAfterBusted(G);
+    }
+    return;
+  }
+
+  // Enter / exit a car.
+  if (wasPressed(input, 'e')) {
+    if (player.inCar) {
+      exitCar(G);
+    } else if (G.stealTarget) {
+      stealCar(G, G.stealTarget);
+    }
+  }
+
+  if (player.inCar) updatePlayerCar(G, dt);
+  else updatePlayerOnFoot(G, dt);
+
+  G.stealTarget = player.inCar ? null : nearestStealable(G);
+  updateTraffic(G, dt);
+  updatePeds(G, dt);
+  updateWanted(G, dt);
+  updatePolice(G, dt);
+  updateHeli(G, dt);
+  updateMissions(G, dt);
+  updateCombat(G, dt);
+  collideCarsWithWorld(G, dt);
+  G.particles.update(dt);
+  updateAudio(G, dt);
+  updateCamera(G, dt);
+
+  // Slow health regen when the heat is off.
+  if (G.wanted.stars === 0 && player.health < CFG.playerMaxHealth) {
+    player.health = Math.min(CFG.playerMaxHealth, player.health + dt * 3);
+  }
+
+  // Mission car stays parked until stolen.
+  if (G.missionCar && G.missions.index === 0 && G.missions.stage <= 1 && !G.playerCar?.isMission) {
+    const mc = G.missionCar;
+    const near = Math.hypot(player.x - mc.x, player.y - mc.y) < CFG.stealRange && !player.inCar;
+    if (near) G.stealTarget = mc;
+  }
+
+  // Auto-save every 30 seconds of play.
+  if (Math.floor(G.stats.playSeconds) % 30 === 0 && Math.floor(G.stats.playSeconds) > 0 && !G._savedTick) {
+    G._savedTick = Math.floor(G.stats.playSeconds);
+    saveGame();
+  }
+  if (Math.floor(G.stats.playSeconds) % 30 !== 0) G._savedTick = 0;
+}
+
+function frame(G, now) {
+  requestAnimationFrame((t) => frame(G, t));
+  const dt = Math.min(0.05, (now - (G._last || now)) / 1000 || 0.016);
+  G._last = now;
+  const { input } = G;
+
+  if (!G.ui.started) {
+    drawStartScreen(G);
+    // A scene link (?scene=cover etc.) starts on its own so the game
+    // can be captured headless; a human still clicks or presses a key.
+    const autoScene = sceneFromUrl();
+    if (autoScene || input.anyKey || input.mouse.clicked) {
+      G.ui.started = true;
+      G.audio.enabled = true;
+      ensureAudio(G);
+      const had = loadGame(G);
+      if (had) G.feed.push('Save loaded — welcome back to Costa Vidrio');
+      const scene = sceneFromUrl();
+      if (scene) {
+        stageScene(G, scene);
+        G.ui.started = true;
+      } else if (G.missions.completedCount === 0 && !G.missions.started) {
+        startEpisode(G, 0);
       }
-      return;
+      G.audio.fanfare();
     }
-    if (screen === SCREEN_BUSTED || screen === SCREEN_COMPLETE) {
-      if (actions & ACTION_CONFIRM) {
-        audio.unlock();
-        const next = state.mission.id >= 2 ? 1 : state.mission.id + 1;
-        startEpisodePlay(next);
-      }
-      return;
-    }
-    if (actions & ACTION_PAUSE) {
-      screen = screen === SCREEN_PLAY ? SCREEN_PAUSED : SCREEN_PLAY;
-      announce(screen === SCREEN_PAUSED ? 'Paused.' : 'Playing.');
-    }
-    // Interact and punch are handled inside step(), where the simulation
-    // takes the one-shot flags once per fixed step.
+    endFrame(input);
+    return;
   }
 
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      // The city idles behind the title: traffic drives, people walk.
-      stepTrafficCars(state, STEP);
-      stepPedestrians(state, STEP);
-      stepWorld(state, STEP);
-      return;
-    }
-    if (screen !== SCREEN_PLAY) return;
-    // One-shot gameplay flags, taken once per frame by frame() and spent here.
-    const actions = pendingActions;
-    pendingActions = 0;
-    if (actions & ACTION_INTERACT) {
-      if (state.player.onFoot) {
-        if (tryEnterCar(state)) audio.steal();
-      } else {
-        exitCar(state);
-      }
-    }
-    if (actions & ACTION_PUNCH && state.player.onFoot) {
-      if (punch(state)) audio.punch();
-    }
-    stepPlayer(state, STEP, input, actions);
-    stepTrafficCars(state, STEP);
-    stepPedestrians(state, STEP);
-    updateWanted(state, STEP);
-    syncPolice(state);
-    const events = stepPolice(state, STEP);
-    stepHeli(state, STEP);
-    const missionEvents = stepMissions(state, STEP);
-    stepCombat(state, STEP);
-    stepWorld(state, STEP);
-    const car = state.cars.find((c) => c.id === state.player.carId);
-    audio.engine(car && !state.player.onFoot ? Math.abs(car.speed) : 0, !state.player.onFoot);
-    audio.siren(state.police.length > 0, state.time);
-    if (events & EVENT_BUSTED) endBusted();
-    else if (missionEvents & EVENT_MISSION_DONE) endEpisode();
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    // One consumer for the frame's one-shot presses: menus and pause here,
-    // interact and punch saved for the next fixed step.
-    const frameActions = input.takeActions();
-    handleActions(frameActions);
-    pendingActions |= frameActions & (ACTION_INTERACT | ACTION_PUNCH);
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-      pendingActions = 0;
-    }
-    renderer.draw(state, screen);
-  }
-
-  // Leaving the tab pauses a running game rather than letting the chase run unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  // Number keys pick an episode straight from the title screen.
-  window.addEventListener('keydown', (event) => {
-    if (screen !== SCREEN_TITLE) return;
-    if (event.code === 'Digit1') {
-      audio.unlock();
-      startEpisodePlay(1);
-    } else if (event.code === 'Digit2') {
-      audio.unlock();
-      startEpisodePlay(2);
-    }
-  });
-
-  announce('Live Heist. Press Enter to go live from Costa Vidrio.');
-  requestAnimationFrame(frame);
+  update(G, dt);
+  G.ctx.clearRect(0, 0, CFG.viewW, CFG.viewH);
+  renderWorld(G);
+  drawHUD(G);
+  endFrame(input);
 }
 
-if (shot) runShot(shot);
-else runGame();
+function boot() {
+  const canvas = document.getElementById('game');
+  canvas.width = CFG.viewW;
+  canvas.height = CFG.viewH;
+  const G = createGame(canvas);
+  window.__LIVEHEIST__ = G;
+  window.__GAME_READY__ = true;
+  requestAnimationFrame((t) => frame(G, t));
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
